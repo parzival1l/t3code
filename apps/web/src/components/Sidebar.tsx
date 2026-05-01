@@ -155,6 +155,7 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "./ui/sidebar";
+import { SidebarPastChatsSection } from "./SidebarPastChatsSection";
 import { useThreadSelectionStore } from "../threadSelectionStore";
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import {
@@ -903,6 +904,12 @@ interface SidebarProjectItemProps {
   attachThreadListAutoAnimateRef: (node: HTMLElement | null) => void;
   expandThreadListForProject: (projectKey: string) => void;
   collapseThreadListForProject: (projectKey: string) => void;
+  isPastChatsExpanded: boolean;
+  isPastChatsListExpanded: boolean;
+  expandPastChatsForProject: (projectKey: string) => void;
+  collapsePastChatsForProject: (projectKey: string) => void;
+  expandPastChatsListForProject: (projectKey: string) => void;
+  collapsePastChatsListForProject: (projectKey: string) => void;
   dragInProgressRef: React.RefObject<boolean>;
   suppressProjectClickAfterDragRef: React.RefObject<boolean>;
   suppressProjectClickForContextMenuRef: React.RefObject<boolean>;
@@ -923,6 +930,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     attachThreadListAutoAnimateRef,
     expandThreadListForProject,
     collapseThreadListForProject,
+    isPastChatsExpanded,
+    isPastChatsListExpanded,
+    expandPastChatsForProject,
+    collapsePastChatsForProject,
+    expandPastChatsListForProject,
+    collapsePastChatsListForProject,
     dragInProgressRef,
     suppressProjectClickAfterDragRef,
     suppressProjectClickForContextMenuRef,
@@ -2108,6 +2121,18 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         collapseThreadListForProject={collapseThreadListForProject}
       />
 
+      <SidebarPastChatsSection
+        projectKey={project.projectKey}
+        projectCwd={project.cwd}
+        projectExpanded={projectExpanded}
+        isPastChatsExpanded={isPastChatsExpanded}
+        isPastChatsListExpanded={isPastChatsListExpanded}
+        expandPastChatsForProject={expandPastChatsForProject}
+        collapsePastChatsForProject={collapsePastChatsForProject}
+        expandPastChatsListForProject={expandPastChatsListForProject}
+        collapsePastChatsListForProject={collapsePastChatsListForProject}
+      />
+
       <Dialog
         open={projectRenameTarget !== null}
         onOpenChange={(open) => {
@@ -2539,6 +2564,8 @@ interface SidebarProjectsContentProps {
   deleteThread: ReturnType<typeof useThreadActions>["deleteThread"];
   sortedProjects: readonly SidebarProjectSnapshot[];
   expandedThreadListsByProject: ReadonlySet<string>;
+  expandedPastChatsByProject: ReadonlySet<string>;
+  expandedPastChatsListsByProject: ReadonlySet<string>;
   activeRouteProjectKey: string | null;
   routeThreadKey: string | null;
   newThreadShortcutLabel: string | null;
@@ -2547,6 +2574,10 @@ interface SidebarProjectsContentProps {
   attachThreadListAutoAnimateRef: (node: HTMLElement | null) => void;
   expandThreadListForProject: (projectKey: string) => void;
   collapseThreadListForProject: (projectKey: string) => void;
+  expandPastChatsForProject: (projectKey: string) => void;
+  collapsePastChatsForProject: (projectKey: string) => void;
+  expandPastChatsListForProject: (projectKey: string) => void;
+  collapsePastChatsListForProject: (projectKey: string) => void;
   dragInProgressRef: React.RefObject<boolean>;
   suppressProjectClickAfterDragRef: React.RefObject<boolean>;
   suppressProjectClickForContextMenuRef: React.RefObject<boolean>;
@@ -2580,6 +2611,8 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     deleteThread,
     sortedProjects,
     expandedThreadListsByProject,
+    expandedPastChatsByProject,
+    expandedPastChatsListsByProject,
     activeRouteProjectKey,
     routeThreadKey,
     newThreadShortcutLabel,
@@ -2588,6 +2621,10 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
     attachThreadListAutoAnimateRef,
     expandThreadListForProject,
     collapseThreadListForProject,
+    expandPastChatsForProject,
+    collapsePastChatsForProject,
+    expandPastChatsListForProject,
+    collapsePastChatsListForProject,
     dragInProgressRef,
     suppressProjectClickAfterDragRef,
     suppressProjectClickForContextMenuRef,
@@ -2734,6 +2771,14 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                         attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
                         expandThreadListForProject={expandThreadListForProject}
                         collapseThreadListForProject={collapseThreadListForProject}
+                        isPastChatsExpanded={expandedPastChatsByProject.has(project.projectKey)}
+                        isPastChatsListExpanded={expandedPastChatsListsByProject.has(
+                          project.projectKey,
+                        )}
+                        expandPastChatsForProject={expandPastChatsForProject}
+                        collapsePastChatsForProject={collapsePastChatsForProject}
+                        expandPastChatsListForProject={expandPastChatsListForProject}
+                        collapsePastChatsListForProject={collapsePastChatsListForProject}
                         dragInProgressRef={dragInProgressRef}
                         suppressProjectClickAfterDragRef={suppressProjectClickAfterDragRef}
                         suppressProjectClickForContextMenuRef={
@@ -2766,6 +2811,14 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
                 attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
                 expandThreadListForProject={expandThreadListForProject}
                 collapseThreadListForProject={collapseThreadListForProject}
+                isPastChatsExpanded={expandedPastChatsByProject.has(project.projectKey)}
+                isPastChatsListExpanded={expandedPastChatsListsByProject.has(
+                  project.projectKey,
+                )}
+                expandPastChatsForProject={expandPastChatsForProject}
+                collapsePastChatsForProject={collapsePastChatsForProject}
+                expandPastChatsListForProject={expandPastChatsListForProject}
+                collapsePastChatsListForProject={collapsePastChatsListForProject}
                 dragInProgressRef={dragInProgressRef}
                 suppressProjectClickAfterDragRef={suppressProjectClickAfterDragRef}
                 suppressProjectClickForContextMenuRef={suppressProjectClickForContextMenuRef}
@@ -2812,6 +2865,12 @@ export default function Sidebar() {
   const keybindings = useServerKeybindings();
   const openAddProjectCommandPalette = useCommandPaletteStore((store) => store.openAddProject);
   const [expandedThreadListsByProject, setExpandedThreadListsByProject] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
+  const [expandedPastChatsByProject, setExpandedPastChatsByProject] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
+  const [expandedPastChatsListsByProject, setExpandedPastChatsListsByProject] = useState<
     ReadonlySet<string>
   >(() => new Set());
   const { showThreadJumpHints, updateThreadJumpHintsVisibility } = useThreadJumpHintVisibility();
@@ -3412,6 +3471,48 @@ export default function Sidebar() {
     });
   }, []);
 
+  const expandPastChatsForProject = useCallback((projectKey: string) => {
+    setExpandedPastChatsByProject((current) => {
+      if (current.has(projectKey)) return current;
+      const next = new Set(current);
+      next.add(projectKey);
+      return next;
+    });
+  }, []);
+
+  const collapsePastChatsForProject = useCallback((projectKey: string) => {
+    setExpandedPastChatsByProject((current) => {
+      if (!current.has(projectKey)) return current;
+      const next = new Set(current);
+      next.delete(projectKey);
+      return next;
+    });
+    setExpandedPastChatsListsByProject((current) => {
+      if (!current.has(projectKey)) return current;
+      const next = new Set(current);
+      next.delete(projectKey);
+      return next;
+    });
+  }, []);
+
+  const expandPastChatsListForProject = useCallback((projectKey: string) => {
+    setExpandedPastChatsListsByProject((current) => {
+      if (current.has(projectKey)) return current;
+      const next = new Set(current);
+      next.add(projectKey);
+      return next;
+    });
+  }, []);
+
+  const collapsePastChatsListForProject = useCallback((projectKey: string) => {
+    setExpandedPastChatsListsByProject((current) => {
+      if (!current.has(projectKey)) return current;
+      const next = new Set(current);
+      next.delete(projectKey);
+      return next;
+    });
+  }, []);
+
   return (
     <>
       <SidebarChromeHeader isElectron={isElectron} />
@@ -3443,6 +3544,8 @@ export default function Sidebar() {
             deleteThread={deleteThread}
             sortedProjects={sortedProjects}
             expandedThreadListsByProject={expandedThreadListsByProject}
+            expandedPastChatsByProject={expandedPastChatsByProject}
+            expandedPastChatsListsByProject={expandedPastChatsListsByProject}
             activeRouteProjectKey={activeRouteProjectKey}
             routeThreadKey={routeThreadKey}
             newThreadShortcutLabel={newThreadShortcutLabel}
@@ -3451,6 +3554,10 @@ export default function Sidebar() {
             attachThreadListAutoAnimateRef={attachThreadListAutoAnimateRef}
             expandThreadListForProject={expandThreadListForProject}
             collapseThreadListForProject={collapseThreadListForProject}
+            expandPastChatsForProject={expandPastChatsForProject}
+            collapsePastChatsForProject={collapsePastChatsForProject}
+            expandPastChatsListForProject={expandPastChatsListForProject}
+            collapsePastChatsListForProject={collapsePastChatsListForProject}
             dragInProgressRef={dragInProgressRef}
             suppressProjectClickAfterDragRef={suppressProjectClickAfterDragRef}
             suppressProjectClickForContextMenuRef={suppressProjectClickForContextMenuRef}
