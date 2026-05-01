@@ -1,7 +1,12 @@
-import { memo, useMemo } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
 import { ChevronRightIcon, HistoryIcon } from "lucide-react";
 
+import type { EnvironmentId } from "@t3tools/contracts";
+
+import { hydrateLibraryThread } from "../library/hydrateLibraryThread";
+import { libraryThreadIdForSession } from "../library/isLibraryThread";
 import {
   SidebarMenuSub,
   SidebarMenuSubButton,
@@ -36,6 +41,7 @@ type SessionSummary = {
 interface SidebarPastChatsSectionProps {
   projectKey: string;
   projectCwd: string;
+  environmentId: EnvironmentId;
   projectExpanded: boolean;
   isPastChatsExpanded: boolean;
   isPastChatsListExpanded: boolean;
@@ -51,6 +57,7 @@ export const SidebarPastChatsSection = memo(function SidebarPastChatsSection(
   const {
     projectKey,
     projectCwd,
+    environmentId,
     projectExpanded,
     isPastChatsExpanded,
     isPastChatsListExpanded,
@@ -92,6 +99,7 @@ export const SidebarPastChatsSection = memo(function SidebarPastChatsSection(
         <PastChatsList
           projectKey={projectKey}
           projectCwd={projectCwd}
+          environmentId={environmentId}
           isPastChatsListExpanded={isPastChatsListExpanded}
           expandPastChatsListForProject={expandPastChatsListForProject}
           collapsePastChatsListForProject={collapsePastChatsListForProject}
@@ -104,6 +112,7 @@ export const SidebarPastChatsSection = memo(function SidebarPastChatsSection(
 interface PastChatsListProps {
   projectKey: string;
   projectCwd: string;
+  environmentId: EnvironmentId;
   isPastChatsListExpanded: boolean;
   expandPastChatsListForProject: (projectKey: string) => void;
   collapsePastChatsListForProject: (projectKey: string) => void;
@@ -113,6 +122,7 @@ function PastChatsList(props: PastChatsListProps) {
   const {
     projectKey,
     projectCwd,
+    environmentId,
     isPastChatsListExpanded,
     expandPastChatsListForProject,
     collapsePastChatsListForProject,
@@ -155,7 +165,11 @@ function PastChatsList(props: PastChatsListProps) {
   return (
     <>
       {visible.map((session) => (
-        <SessionRow key={session.session_id} session={session} />
+        <SessionRow
+          key={session.session_id}
+          session={session}
+          environmentId={environmentId}
+        />
       ))}
       {hasOverflow && !isPastChatsListExpanded ? (
         <SidebarMenuSubItem className="w-full">
@@ -187,10 +201,46 @@ function PastChatsList(props: PastChatsListProps) {
   );
 }
 
-function SessionRow({ session }: { session: SessionSummary }) {
+function SessionRow({
+  session,
+  environmentId,
+}: {
+  session: SessionSummary;
+  environmentId: EnvironmentId;
+}) {
+  const navigate = useNavigate();
+  const [isOpening, setIsOpening] = useState(false);
+  const [openError, setOpenError] = useState<string | null>(null);
   const label = session.custom_name ?? session.session_id.slice(0, 8);
   const showStatus = session.status !== "active";
   const relative = session.modified_at ? formatRelative(session.modified_at) : null;
+
+  const handleOpen = useCallback(() => {
+    if (isOpening) return;
+    setIsOpening(true);
+    setOpenError(null);
+    void hydrateLibraryThread({
+      environmentId,
+      sessionId: session.session_id,
+      session,
+    })
+      .then(() => {
+        const threadId = libraryThreadIdForSession(session.session_id);
+        return navigate({
+          to: "/$environmentId/$threadId",
+          params: { environmentId, threadId },
+        });
+      })
+      .catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        setOpenError(msg);
+        // eslint-disable-next-line no-console
+        console.error("[past-chat] failed to open session", session.session_id, err);
+      })
+      .finally(() => {
+        setIsOpening(false);
+      });
+  }, [environmentId, isOpening, navigate, session]);
 
   return (
     <SidebarMenuSubItem className="w-full">
@@ -199,14 +249,12 @@ function SessionRow({ session }: { session: SessionSummary }) {
         data-thread-selection-safe
         size="sm"
         className="h-6 w-full translate-x-0 justify-start gap-2 px-2 text-left text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
-        onClick={() => {
-          // TODO(phaseB): synthesize a read-only thread for this session and
-          // route through MessagesTimeline.
-          // eslint-disable-next-line no-console
-          console.log("[past-chat] open session", session.session_id);
-        }}
+        onClick={handleOpen}
+        aria-busy={isOpening || undefined}
       >
-        <span className="min-w-0 flex-1 truncate">{label}</span>
+        <span className="min-w-0 flex-1 truncate">
+          {openError ? `! ${label}` : label}
+        </span>
         {showStatus ? (
           <span className="shrink-0 rounded bg-muted px-1 py-0 text-[9px] uppercase tracking-wide text-muted-foreground/80">
             {session.status}

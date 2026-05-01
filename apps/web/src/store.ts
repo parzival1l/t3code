@@ -328,6 +328,7 @@ function toThreadShell(thread: Thread): ThreadShell {
     updatedAt: thread.updatedAt,
     branch: thread.branch,
     worktreePath: thread.worktreePath,
+    ...(thread.readOnly ? { readOnly: true as const } : {}),
   };
 }
 
@@ -423,7 +424,8 @@ function threadShellsEqual(left: ThreadShell | undefined, right: ThreadShell): b
     left.archivedAt === right.archivedAt &&
     left.updatedAt === right.updatedAt &&
     left.branch === right.branch &&
-    left.worktreePath === right.worktreePath
+    left.worktreePath === right.worktreePath &&
+    left.readOnly === right.readOnly
   );
 }
 
@@ -499,9 +501,15 @@ function getProjects(state: EnvironmentState): Project[] {
 }
 
 function getThreads(state: EnvironmentState): Thread[] {
+  // Library (synthetic) threads are excluded from list selectors so they
+  // don't leak into the live sidebar, command palette, settings archive,
+  // terminal mount tracking, or anything else that iterates "all threads".
+  // Direct lookups by ref (selectThreadByRef / getThreadFromEnvironmentState)
+  // still resolve them — that path is what the chat view uses.
   return state.threadIds.flatMap((threadId) => {
     const thread = getThreadFromEnvironmentState(state, threadId);
-    return thread ? [thread] : [];
+    if (!thread || thread.readOnly) return [];
+    return [thread];
   });
 }
 
@@ -1142,6 +1150,26 @@ export function syncServerThreadDetail(
     state,
     environmentId,
     writeThreadState(environmentState, mapThread(thread, environmentId), previousThread),
+  );
+}
+
+// Inject a synthetic library (read-only past-chat) thread directly into the
+// store. Bypasses the orchestration event system because there is no server
+// for these threads — the data comes from the threadhop sidecar. Writes
+// shell + messages via the standard detail-stream code path
+// (writeThreadState) but never writes sidebarThreadSummaryById, so library
+// threads do not appear in the live sidebar list.
+export function injectLibraryThread(
+  state: AppState,
+  thread: Thread,
+  environmentId: EnvironmentId,
+): AppState {
+  const environmentState = getStoredEnvironmentState(state, environmentId);
+  const previousThread = getThreadFromEnvironmentState(environmentState, thread.id);
+  return commitEnvironmentState(
+    state,
+    environmentId,
+    writeThreadState(environmentState, thread, previousThread),
   );
 }
 
@@ -1951,6 +1979,7 @@ interface AppStore extends AppState {
     environmentId: EnvironmentId,
   ) => void;
   syncServerThreadDetail: (thread: OrchestrationThread, environmentId: EnvironmentId) => void;
+  injectLibraryThread: (thread: Thread, environmentId: EnvironmentId) => void;
   applyOrchestrationEvent: (event: OrchestrationEvent, environmentId: EnvironmentId) => void;
   applyOrchestrationEvents: (
     events: ReadonlyArray<OrchestrationEvent>,
@@ -1975,6 +2004,8 @@ export const useStore = create<AppStore>((set) => ({
     set((state) => syncServerShellSnapshot(state, snapshot, environmentId)),
   syncServerThreadDetail: (thread, environmentId) =>
     set((state) => syncServerThreadDetail(state, thread, environmentId)),
+  injectLibraryThread: (thread, environmentId) =>
+    set((state) => injectLibraryThread(state, thread, environmentId)),
   applyOrchestrationEvent: (event, environmentId) =>
     set((state) => applyOrchestrationEvent(state, event, environmentId)),
   applyOrchestrationEvents: (events, environmentId) =>

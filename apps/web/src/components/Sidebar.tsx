@@ -2124,6 +2124,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       <SidebarPastChatsSection
         projectKey={project.projectKey}
         projectCwd={project.cwd}
+        environmentId={project.environmentId}
         projectExpanded={projectExpanded}
         isPastChatsExpanded={isPastChatsExpanded}
         isPastChatsListExpanded={isPastChatsListExpanded}

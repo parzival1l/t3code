@@ -61,6 +61,7 @@ import {
   selectThreadByRef,
   selectThreadsAcrossEnvironments,
 } from "~/store";
+import { isLibraryThreadId } from "~/library/isLibraryThread";
 import { useTerminalStateStore } from "~/terminalStateStore";
 import { useUiStateStore } from "~/uiStateStore";
 import type { WsProtocolCloseContext } from "../../rpc/protocol";
@@ -532,6 +533,13 @@ export function retainThreadDetailSubscription(
   environmentId: EnvironmentId,
   threadId: ThreadId,
 ): () => void {
+  // Library (synthetic) threads have no server-side state and must not open
+  // a WS subscription — there is nothing to subscribe to. Returning a noop
+  // release fn keeps every caller (ChatView mount effect, sidebar prewarm)
+  // shape-compatible without each one needing its own gate.
+  if (isLibraryThreadId(threadId)) {
+    return () => {};
+  }
   const key = getThreadDetailSubscriptionKey(environmentId, threadId);
   const existing = threadDetailSubscriptions.get(key);
   if (existing) {

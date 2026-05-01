@@ -115,6 +115,11 @@ export interface Thread {
   worktreePath: string | null;
   turnDiffSummaries: TurnDiffSummary[];
   activities: OrchestrationThreadActivity[];
+  // Library view (Phase B): synthetic threads hydrated from threadhop sidecar
+  // for past-chat playback. Marks the thread as read-only — composer is
+  // hidden, WS subscription is skipped, live affordances no-op. Set only on
+  // threads with id starting `library-`.
+  readOnly?: true | undefined;
 }
 
 export interface ThreadShell {
@@ -132,6 +137,7 @@ export interface ThreadShell {
   updatedAt?: string | undefined;
   branch: string | null;
   worktreePath: string | null;
+  readOnly?: true | undefined;
 }
 
 export interface ThreadTurnState {

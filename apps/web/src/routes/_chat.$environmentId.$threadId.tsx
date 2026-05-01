@@ -17,6 +17,11 @@ import {
   stripDiffSearchParams,
 } from "../diffRouteSearch";
 import { useMediaQuery } from "../hooks/useMediaQuery";
+import { hydrateLibraryThread } from "../library/hydrateLibraryThread";
+import {
+  isLibraryThreadId,
+  sessionIdFromLibraryThreadId,
+} from "../library/isLibraryThread";
 import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../rightPanelLayout";
 import { selectEnvironmentState, selectThreadExistsByRef, useStore } from "../store";
 import { createThreadSelectorByRef } from "../storeSelectors";
@@ -164,9 +169,11 @@ function ChatThreadRouteView() {
     }
     return store.hasDraftThreadsInEnvironment(threadRef.environmentId);
   });
+  const isLibraryRoute = threadRef ? isLibraryThreadId(threadRef.threadId) : false;
   const routeThreadExists = threadExists || draftThreadExists;
   const serverThreadStarted = threadHasStarted(serverThread);
   const environmentHasAnyThreads = environmentHasServerThreads || environmentHasDraftThreads;
+  const [libraryHydrationError, setLibraryHydrationError] = useState<string | null>(null);
   const diffOpen = search.diff === "1";
   const shouldUseDiffSheet = useMediaQuery(RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY);
   const currentThreadKey = threadRef ? `${threadRef.environmentId}:${threadRef.threadId}` : null;
@@ -219,10 +226,52 @@ function ChatThreadRouteView() {
       return;
     }
 
+    // Library (synthetic past-chat) routes are hydrated lazily from the
+    // threadhop sidecar; never bounce them to "/" before the hydration
+    // effect below has had a chance to run.
+    if (isLibraryRoute) {
+      return;
+    }
+
     if (!routeThreadExists && environmentHasAnyThreads) {
       void navigate({ to: "/", replace: true });
     }
-  }, [bootstrapComplete, environmentHasAnyThreads, navigate, routeThreadExists, threadRef]);
+  }, [
+    bootstrapComplete,
+    environmentHasAnyThreads,
+    isLibraryRoute,
+    navigate,
+    routeThreadExists,
+    threadRef,
+  ]);
+
+  // Refresh-resilience: when the route lands on `/<envId>/library-<sessionId>`
+  // (deep link or page reload), the synthetic thread is not yet in the store
+  // because Phase A's react-query cache is empty after a hard reload. Fetch
+  // from the sidecar and inject so the chat view can render normally.
+  useEffect(() => {
+    if (!threadRef || !isLibraryRoute || threadExists) {
+      return;
+    }
+    const sessionId = sessionIdFromLibraryThreadId(threadRef.threadId);
+    if (!sessionId) {
+      return;
+    }
+    let cancelled = false;
+    void hydrateLibraryThread({
+      environmentId: threadRef.environmentId,
+      sessionId,
+    }).catch((err: unknown) => {
+      if (cancelled) return;
+      const msg = err instanceof Error ? err.message : String(err);
+      setLibraryHydrationError(msg);
+      // eslint-disable-next-line no-console
+      console.error("[library-route] hydrate failed", sessionId, err);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isLibraryRoute, threadExists, threadRef]);
 
   useEffect(() => {
     if (!threadRef || !serverThreadStarted || !draftThread?.promotedTo) {
@@ -231,7 +280,28 @@ function ChatThreadRouteView() {
     finalizePromotedDraftThreadByRef(threadRef);
   }, [draftThread?.promotedTo, serverThreadStarted, threadRef]);
 
-  if (!threadRef || !bootstrapComplete || !routeThreadExists) {
+  if (!threadRef || !bootstrapComplete) {
+    return null;
+  }
+
+  if (isLibraryRoute && !threadExists) {
+    return (
+      <SidebarInset className="flex h-dvh min-h-0 items-center justify-center bg-background text-foreground">
+        <div className="text-center text-muted-foreground text-xs">
+          {libraryHydrationError ? (
+            <>
+              <div className="font-medium text-destructive">Failed to load past chat</div>
+              <div className="mt-1">{libraryHydrationError}</div>
+            </>
+          ) : (
+            <>Loading past chat…</>
+          )}
+        </div>
+      </SidebarInset>
+    );
+  }
+
+  if (!routeThreadExists) {
     return null;
   }
 
