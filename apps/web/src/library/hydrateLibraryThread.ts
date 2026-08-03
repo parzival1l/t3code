@@ -1,6 +1,6 @@
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 
-import { selectEnvironmentState, useStore } from "../store";
+import { readThreadDetail } from "../state/entities";
 import {
   type LibraryMessageRow,
   type LibrarySessionSummary,
@@ -71,25 +71,37 @@ export interface HydrateLibraryThreadResult {
   threadId: ThreadId;
 }
 
-// Idempotent: if the synthetic thread is already in the store, returns its
-// id without refetching. Caller uses the returned id for navigation; route
-// loader uses this on mount when the route's threadId starts with `library-`
-// and is not yet in the store (refresh-resilience path).
+// Idempotent: if the synthetic thread is already in state, returns its id
+// without refetching. Caller uses the returned id for navigation; the route
+// calls this on mount when the route's threadId starts with `library-` and is
+// not yet in state (refresh-resilience path).
+//
+// PORT REQUIRED — upstream e95b57dc2 ("Rewrite client connection architecture")
+// deleted the zustand store this used to write into. `EnvironmentThread` values
+// are now derived read-only from `threadStateAtom`, which only the connection
+// layer feeds. There is no client-side injection seam, so synthetic threads
+// cannot be written into state yet. Two viable ports:
+//   1. Add a local-override atom layered into `threadStateAtom` in
+//      packages/client-runtime/src/state/threadDetail.ts.
+//   2. Synthesize orchestration events and push them through threadReducer.
+// Everything below the fetch/synthesize line still works and is kept intact so
+// the port only has to replace the final write.
 export async function hydrateLibraryThread(
   input: HydrateLibraryThreadInput,
 ): Promise<HydrateLibraryThreadResult> {
   const { environmentId, sessionId } = input;
   const threadId = libraryThreadIdForSession(sessionId);
 
-  const state = useStore.getState();
-  const existingShell = selectEnvironmentState(state, environmentId).threadShellById[threadId];
-  if (existingShell?.readOnly) {
+  const existing = readThreadDetail({ environmentId, threadId });
+  if (existing?.readOnly) {
     return { threadId };
   }
 
   const session = input.session ?? (await lookupSessionSummary(sessionId));
   const messages = await fetchLibraryMessages(sessionId);
   const thread = synthesizeLibraryThread({ environmentId, session, messages });
-  useStore.getState().injectLibraryThread(thread, environmentId);
-  return { threadId };
+  void thread;
+  throw new Error(
+    "Library threads cannot be injected yet: the client state rewrite removed the store write path. See the PORT REQUIRED note in hydrateLibraryThread.ts.",
+  );
 }

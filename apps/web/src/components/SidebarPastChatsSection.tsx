@@ -7,11 +7,7 @@ import type { EnvironmentId } from "@t3tools/contracts";
 
 import { hydrateLibraryThread } from "../library/hydrateLibraryThread";
 import { libraryThreadIdForSession } from "../library/isLibraryThread";
-import {
-  SidebarMenuSub,
-  SidebarMenuSubButton,
-  SidebarMenuSubItem,
-} from "./ui/sidebar";
+import { SidebarMenuSub, SidebarMenuSubButton, SidebarMenuSubItem } from "./ui/sidebar";
 
 const RENDER_AS_BUTTON = <button type="button" />;
 
@@ -131,9 +127,7 @@ function PastChatsList(props: PastChatsListProps) {
   const { data, isPending, error } = useQuery<SessionSummary[]>({
     queryKey: ["library", "sessions", projectCwd],
     queryFn: async () => {
-      const r = await fetch(
-        `${SIDECAR_BASE}/sessions?project=${encodeURIComponent(projectCwd)}`,
-      );
+      const r = await fetch(`${SIDECAR_BASE}/sessions?project=${encodeURIComponent(projectCwd)}`);
       if (!r.ok) throw new Error(`sidecar ${r.status}`);
       return (await r.json()) as SessionSummary[];
     },
@@ -148,15 +142,11 @@ function PastChatsList(props: PastChatsListProps) {
   }, [sessions, isPastChatsListExpanded, hasOverflow]);
 
   if (isPending) {
-    return (
-      <PastChatsStateRow>Loading…</PastChatsStateRow>
-    );
+    return <PastChatsStateRow>Loading…</PastChatsStateRow>;
   }
   if (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    return (
-      <PastChatsStateRow tone="error">Sidecar error: {msg}</PastChatsStateRow>
-    );
+    return <PastChatsStateRow tone="error">Sidecar error: {msg}</PastChatsStateRow>;
   }
   if (sessions.length === 0) {
     return <PastChatsStateRow>No past chats</PastChatsStateRow>;
@@ -165,11 +155,7 @@ function PastChatsList(props: PastChatsListProps) {
   return (
     <>
       {visible.map((session) => (
-        <SessionRow
-          key={session.session_id}
-          session={session}
-          environmentId={environmentId}
-        />
+        <SessionRow key={session.session_id} session={session} environmentId={environmentId} />
       ))}
       {hasOverflow && !isPastChatsListExpanded ? (
         <SidebarMenuSubItem className="w-full">
@@ -234,7 +220,6 @@ function SessionRow({
       .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
         setOpenError(msg);
-        // eslint-disable-next-line no-console
         console.error("[past-chat] failed to open session", session.session_id, err);
       })
       .finally(() => {
@@ -252,17 +237,13 @@ function SessionRow({
         onClick={handleOpen}
         aria-busy={isOpening || undefined}
       >
-        <span className="min-w-0 flex-1 truncate">
-          {openError ? `! ${label}` : label}
-        </span>
+        <span className="min-w-0 flex-1 truncate">{openError ? `! ${label}` : label}</span>
         {showStatus ? (
           <span className="shrink-0 rounded bg-muted px-1 py-0 text-[9px] uppercase tracking-wide text-muted-foreground/80">
             {session.status}
           </span>
         ) : null}
-        {relative ? (
-          <span className="shrink-0 text-muted-foreground/60">{relative}</span>
-        ) : null}
+        {relative ? <span className="shrink-0 text-muted-foreground/60">{relative}</span> : null}
       </SidebarMenuSubButton>
     </SidebarMenuSubItem>
   );

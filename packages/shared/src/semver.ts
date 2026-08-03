@@ -9,12 +9,20 @@ const SEMVER_NUMBER_SEGMENT = /^\d+$/;
 
 export function normalizeSemverVersion(version: string): string {
   const [main, prerelease] = version.trim().split("-", 2);
-  const segments = (main ?? "")
-    .split(".")
-    .map((segment) => segment.trim())
-    .filter((segment) => segment.length > 0);
+  const segments: string[] = [];
+  for (const segment of (main ?? "").split(".")) {
+    const trimmed = segment.trim();
+    if (trimmed.length > 0) {
+      segments.push(trimmed);
+    }
+  }
 
-  if (segments.length === 2) {
+  // Pad shorthand versions ("20" or "20.1") up to three segments so major-only
+  // and minor-only inputs parse and compare numerically. This matches
+  // satisfiesSemverRange, which already treats a missing minor/patch as 0. The
+  // length > 0 guard keeps empty/garbage input empty (parseSemver still
+  // rejects it), and inputs with more than three segments are left untouched.
+  while (segments.length > 0 && segments.length < 3) {
     segments.push("0");
   }
 
@@ -52,12 +60,22 @@ export function parseSemver(value: string): ParsedSemver | null {
     major,
     minor,
     patch,
-    prerelease:
-      prerelease
-        ?.split(".")
-        .map((segment) => segment.trim())
-        .filter((segment) => segment.length > 0) ?? [],
+    prerelease: parsePrereleaseSegments(prerelease),
   };
+}
+
+function parsePrereleaseSegments(prerelease: string | undefined): ReadonlyArray<string> {
+  if (prerelease === undefined) {
+    return [];
+  }
+  const segments: string[] = [];
+  for (const segment of prerelease.split(".")) {
+    const trimmed = segment.trim();
+    if (trimmed.length > 0) {
+      segments.push(trimmed);
+    }
+  }
+  return segments;
 }
 
 function comparePrereleaseIdentifier(left: string, right: string): number {

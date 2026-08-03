@@ -1,21 +1,52 @@
-import { ArchiveIcon, ArchiveX, LoaderIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
-import { useQueryClient } from "@tanstack/react-query";
+import {
+  ArchiveIcon,
+  ArchiveX,
+  InfoIcon,
+  LoaderIcon,
+  PlusIcon,
+  RefreshCwIcon,
+  SettingsIcon,
+} from "lucide-react";
 import { Link } from "@tanstack/react-router";
+import type { CSSProperties } from "react";
 import { useCallback, useMemo, useRef, useState } from "react";
+import { useAtomValue } from "@effect/atom-react";
 import {
   defaultInstanceIdForDriver,
+  type BackgroundActivityProfile,
+  type BackgroundActivitySettings,
   type DesktopUpdateChannel,
   PROVIDER_DISPLAY_NAMES,
   ProviderDriverKind,
   type ProviderInstanceConfig,
   type ProviderInstanceId,
   type ScopedThreadRef,
+  type SidebarProjectGroupingMode,
 } from "@t3tools/contracts";
-import { scopeThreadRef } from "@t3tools/client-runtime";
-import { DEFAULT_UNIFIED_SETTINGS } from "@t3tools/contracts/settings";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
+import {
+  isAtomCommandInterrupted,
+  settlePromise,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
+import {
+  DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE,
+  DEFAULT_UNIFIED_SETTINGS,
+  type EnvironmentIdentificationMode,
+  MAX_GLASS_OPACITY,
+  MIN_GLASS_OPACITY,
+} from "@t3tools/contracts/settings";
+import {
+  getBackgroundActivityBaseProfile,
+  getBackgroundActivityPresetSettings,
+  resolveServerBackgroundActivitySettings,
+} from "@t3tools/shared/backgroundActivitySettings";
 import { createModelSelection } from "@t3tools/shared/model";
+import * as Arr from "effect/Array";
 import * as Duration from "effect/Duration";
 import * as Equal from "effect/Equal";
+import * as Result from "effect/Result";
 import { APP_VERSION, HOSTED_APP_CHANNEL, HOSTED_APP_CHANNEL_LABEL } from "../../branding";
 import {
   canCheckForUpdate,
@@ -26,30 +57,53 @@ import {
 } from "../../components/desktopUpdate.logic";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { TraitsPicker } from "../chat/TraitsPicker";
+import {
+  resolveEnvironmentIdentificationPillLabel,
+  useEnvironmentStageLabel,
+} from "../SidebarStageBackdrop";
 import { isElectron } from "../../env";
 import { buildHostedChannelSelectionUrl, type HostedAppChannel } from "../../hostedPairing";
 import { useTheme } from "../../hooks/useTheme";
-import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
+import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
 import { useThreadActions } from "../../hooks/useThreadActions";
-import {
-  setDesktopUpdateStateQueryData,
-  useDesktopUpdateState,
-} from "../../lib/desktopUpdateReactQuery";
+import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import {
   getCustomModelOptionsByInstance,
   resolveAppModelSelectionState,
 } from "../../modelSelection";
 import {
+  applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
   sortProviderInstanceEntries,
 } from "../../providerInstances";
 import { ensureLocalApi, readLocalApi } from "../../localApi";
-import { useShallow } from "zustand/react/shallow";
-import { selectProjectsAcrossEnvironments, useStore } from "../../store";
+import {
+  primaryServerObservabilityAtom,
+  primaryServerProvidersAtom,
+  serverEnvironment,
+} from "../../state/server";
+import { usePrimaryEnvironment } from "../../state/environments";
+import { useProjects } from "../../state/entities";
 import { useArchivedThreadSnapshots } from "../../lib/archivedThreadsState";
-import { formatRelativeTime, formatRelativeTimeLabel } from "../../timestampFormat";
+import { formatRelativeTimeLabel, getRelativeTimeState } from "../../timestampFormat";
 import { Button } from "../ui/button";
+import {
+  Dialog,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogPanel,
+  DialogPopup,
+  DialogTitle,
+} from "../ui/dialog";
 import { DraftInput } from "../ui/draft-input";
+import {
+  NumberField,
+  NumberFieldDecrement,
+  NumberFieldGroup,
+  NumberFieldIncrement,
+  NumberFieldInput,
+} from "../ui/number-field";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
@@ -65,8 +119,15 @@ import {
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
 import { DRIVER_OPTIONS, getDriverOption } from "./providerDriverMeta";
 import {
+  backgroundActivitySharedPolicySettings,
   buildProviderInstanceUpdatePatch,
   formatDiagnosticsDescription,
+  hasChangedBackgroundActivitySettings,
+  isProjectGroupingEnabled,
+  projectGroupingModeFromToggle,
+  readLastEnabledProjectGroupingMode,
+  rememberEnabledProjectGroupingMode,
+  resolveBackgroundActivityProfileOption,
 } from "./SettingsPanels.logic";
 import {
   SettingResetButton,
@@ -75,8 +136,9 @@ import {
   SettingsSection,
   useRelativeTimeTick,
 } from "./settingsLayout";
+import { searchableSetting } from "./settingsSearch";
 import { ProjectFavicon } from "../ProjectFavicon";
-import { useServerObservability, useServerProviders } from "../../rpc/serverState";
+import { useAtomCommand } from "../../state/use-atom-command";
 
 const THEME_OPTIONS = [
   {
@@ -93,13 +155,141 @@ const THEME_OPTIONS = [
   },
 ] as const;
 
+const ENVIRONMENT_IDENTIFICATION_LABELS: Record<EnvironmentIdentificationMode, string> = {
+  artwork: "Artwork",
+  pill: "Version pill",
+  none: "None",
+};
+
 const TIMESTAMP_FORMAT_LABELS = {
   locale: "System default",
   "12-hour": "12-hour",
   "24-hour": "24-hour",
 } as const;
 
+const BACKGROUND_ACTIVITY_PROFILE_LABELS: Record<BackgroundActivityProfile, string> = {
+  balanced: "Balanced",
+  performance: "Performance",
+  "battery-saver": "Battery saver",
+};
+
+type BackgroundActivityProfileOption = BackgroundActivityProfile | "advanced";
+type BackgroundActivityOverridePatch = Partial<{
+  [K in keyof BackgroundActivitySettings["overrides"]]:
+    | BackgroundActivitySettings["overrides"][K]
+    | undefined;
+}>;
+
+const BACKGROUND_ACTIVITY_PROFILE_OPTION_LABELS: Record<BackgroundActivityProfileOption, string> = {
+  ...BACKGROUND_ACTIVITY_PROFILE_LABELS,
+  advanced: "Advanced",
+};
+
+const BACKGROUND_ACTIVITY_PROFILE_DESCRIPTIONS: Record<BackgroundActivityProfile, string> = {
+  balanced:
+    "Pauses background probes when clients are idle, the host is locked, or low power mode is active.",
+  performance: "Allows scoped background probes while any subscribed client remains connected.",
+  "battery-saver": "Also pauses background probes when the host or client is on battery.",
+};
+
+const ADVANCED_BACKGROUND_ACTIVITY_DESCRIPTION =
+  "Uses custom background intervals with the selected shared power policy.";
+
+const PROVIDER_HEALTH_INTERVAL_STEP_SECONDS = 30;
 const DEFAULT_DRIVER_KIND = ProviderDriverKind.make("codex");
+const BACKGROUND_ACTIVITY_BOOLEAN_OVERRIDES: ReadonlyArray<{
+  readonly key:
+    | "pauseWhenHostLocked"
+    | "pauseWhenHostLowPower"
+    | "pauseWhenClientLowPower"
+    | "pauseWhenOnBattery";
+  readonly label: string;
+}> = [
+  { key: "pauseWhenHostLocked", label: "Pause when host is locked" },
+  { key: "pauseWhenHostLowPower", label: "Pause on host low power" },
+  { key: "pauseWhenClientLowPower", label: "Pause on client low power" },
+  { key: "pauseWhenOnBattery", label: "Pause on battery" },
+];
+
+function durationToSeconds(duration: Duration.Duration): number {
+  return Math.round(Duration.toMillis(duration) / 1_000);
+}
+
+function normalizeIntervalSeconds(value: number | null, minimum = 0): number {
+  if (value === null || !Number.isFinite(value)) {
+    return minimum;
+  }
+  return Math.max(minimum, Math.round(value));
+}
+
+function resetBackgroundActivitySettings() {
+  return {
+    backgroundActivity: DEFAULT_UNIFIED_SETTINGS.backgroundActivity,
+  };
+}
+
+function backgroundActivityProfileSettings(profile: BackgroundActivityProfile) {
+  return {
+    backgroundActivity: {
+      schemaVersion: 1 as const,
+      profile,
+      overrides: {},
+    },
+  };
+}
+
+function backgroundActivityOverrideSettings(
+  current: BackgroundActivitySettings,
+  resolved: ReturnType<typeof resolveServerBackgroundActivitySettings>,
+  overrides: BackgroundActivityOverridePatch,
+) {
+  const nextOverrides: BackgroundActivityOverridePatch = {
+    automaticGitFetchInterval: resolved.automaticGitFetchInterval,
+    providerHealthRefreshInterval: resolved.providerHealthRefreshInterval,
+    hostPowerMonitorActiveInterval: resolved.hostPowerMonitorActiveInterval,
+    hostPowerMonitorIdleInterval: resolved.hostPowerMonitorIdleInterval,
+    idleClientTtl: resolved.idleClientTtl,
+    pauseWhenHostLocked: resolved.pauseWhenHostLocked,
+    pauseWhenHostLowPower: resolved.pauseWhenHostLowPower,
+    pauseWhenClientLowPower: resolved.pauseWhenClientLowPower,
+    pauseWhenOnBattery: resolved.pauseWhenOnBattery,
+    ...overrides,
+  };
+  for (const [key, value] of Object.entries(nextOverrides)) {
+    if (value === undefined) {
+      delete nextOverrides[key as keyof typeof nextOverrides];
+    }
+  }
+  return {
+    backgroundActivity: {
+      schemaVersion: 1 as const,
+      profile: "custom" as const,
+      baseProfile: getBackgroundActivityBaseProfile(current),
+      overrides: nextOverrides as BackgroundActivitySettings["overrides"],
+    },
+  };
+}
+
+function PolicyTooltip({ children }: { readonly children: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <button
+            type="button"
+            className="inline-flex size-5 items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
+            aria-label="Background policy details"
+          >
+            <InfoIcon className="size-3.5" />
+          </button>
+        }
+      />
+      <TooltipPopup side="top" className="max-w-72">
+        {children}
+      </TooltipPopup>
+    </Tooltip>
+  );
+}
 
 function withoutProviderInstanceKey<V>(
   record: Readonly<Record<ProviderInstanceId, V>> | undefined,
@@ -123,10 +313,14 @@ const PROVIDER_SETTINGS = DRIVER_OPTIONS.map((definition) => ({
 
 function ProviderLastChecked({ lastCheckedAt }: { lastCheckedAt: string | null }) {
   useRelativeTimeTick();
-  const lastCheckedRelative = lastCheckedAt ? formatRelativeTime(lastCheckedAt) : null;
+  const lastCheckedRelative = getRelativeTimeState(lastCheckedAt);
 
-  if (!lastCheckedRelative) {
+  if (lastCheckedRelative.status === "missing") {
     return null;
+  }
+
+  if (lastCheckedRelative.status === "invalid") {
+    return <span className="text-[11px] text-muted-foreground/50">Checked unavailable</span>;
   }
 
   return (
@@ -153,11 +347,9 @@ function AboutVersionTitle() {
 }
 
 function AboutVersionSection() {
-  const queryClient = useQueryClient();
-  const updateStateQuery = useDesktopUpdateState();
+  const updateState = useDesktopUpdateState();
   const [isChangingUpdateChannel, setIsChangingUpdateChannel] = useState(false);
 
-  const updateState = updateStateQuery.data ?? null;
   const hasDesktopBridge = typeof window !== "undefined" && Boolean(window.desktopBridge);
   const selectedUpdateChannel = updateState?.channel ?? "latest";
   const selectedHostedAppChannel = hasDesktopBridge ? null : HOSTED_APP_CHANNEL;
@@ -176,9 +368,6 @@ function AboutVersionSection() {
       setIsChangingUpdateChannel(true);
       void bridge
         .setUpdateChannel(channel)
-        .then((state) => {
-          setDesktopUpdateStateQueryData(queryClient, state);
-        })
         .catch((error: unknown) => {
           toastManager.add(
             stackedThreadToast({
@@ -192,7 +381,7 @@ function AboutVersionSection() {
           setIsChangingUpdateChannel(false);
         });
     },
-    [queryClient, selectedUpdateChannel],
+    [selectedUpdateChannel],
   );
 
   const handleButtonClick = useCallback(() => {
@@ -202,20 +391,15 @@ function AboutVersionSection() {
     const action = updateState ? resolveDesktopUpdateButtonAction(updateState) : "none";
 
     if (action === "download") {
-      void bridge
-        .downloadUpdate()
-        .then((result) => {
-          setDesktopUpdateStateQueryData(queryClient, result.state);
-        })
-        .catch((error: unknown) => {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not download update",
-              description: error instanceof Error ? error.message : "Download failed.",
-            }),
-          );
-        });
+      void bridge.downloadUpdate().catch((error: unknown) => {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not download update",
+            description: error instanceof Error ? error.message : "Download failed.",
+          }),
+        );
+      });
       return;
     }
 
@@ -223,23 +407,19 @@ function AboutVersionSection() {
       const confirmed = window.confirm(
         getDesktopUpdateInstallConfirmationMessage(
           updateState ?? { availableVersion: null, downloadedVersion: null },
+          navigator.platform,
         ),
       );
       if (!confirmed) return;
-      void bridge
-        .installUpdate()
-        .then((result) => {
-          setDesktopUpdateStateQueryData(queryClient, result.state);
-        })
-        .catch((error: unknown) => {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not install update",
-              description: error instanceof Error ? error.message : "Install failed.",
-            }),
-          );
-        });
+      void bridge.installUpdate().catch((error: unknown) => {
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not install update",
+            description: error instanceof Error ? error.message : "Install failed.",
+          }),
+        );
+      });
       return;
     }
 
@@ -247,7 +427,6 @@ function AboutVersionSection() {
     void bridge
       .checkForUpdate()
       .then((result) => {
-        setDesktopUpdateStateQueryData(queryClient, result.state);
         if (!result.checked) {
           toastManager.add(
             stackedThreadToast({
@@ -268,7 +447,7 @@ function AboutVersionSection() {
           }),
         );
       });
-  }, [queryClient, updateState]);
+  }, [updateState]);
 
   const action = updateState ? resolveDesktopUpdateButtonAction(updateState) : "none";
   const buttonTooltip = updateState ? getDesktopUpdateButtonTooltip(updateState) : null;
@@ -379,26 +558,34 @@ function AboutVersionSection() {
 
 export function useSettingsRestore(onRestored?: () => void) {
   const { theme, setTheme } = useTheme();
-  const settings = useSettings();
-  const { updateSettings } = useUpdateSettings();
+  const settings = usePrimarySettings();
+  const updateSettings = useUpdatePrimarySettings();
 
-  const isGitWritingModelDirty = !Equal.equals(
+  const isTextGenerationModelDirty = !Equal.equals(
     settings.textGenerationModelSelection ?? null,
     DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection ?? null,
   );
+  const isBackgroundActivityDirty = hasChangedBackgroundActivitySettings(settings);
 
   const changedSettingLabels = useMemo(
     () => [
       ...(theme !== "system" ? ["Theme"] : []),
+      ...(settings.glassOpacity !== DEFAULT_UNIFIED_SETTINGS.glassOpacity ? ["Glass opacity"] : []),
+      ...(settings.environmentIdentificationMode !==
+      DEFAULT_UNIFIED_SETTINGS.environmentIdentificationMode
+        ? ["Environment identification"]
+        : []),
       ...(settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat
         ? ["Time format"]
         : []),
       ...(settings.sidebarThreadPreviewCount !== DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount
         ? ["Visible threads"]
         : []),
-      ...(settings.diffWordWrap !== DEFAULT_UNIFIED_SETTINGS.diffWordWrap
-        ? ["Diff line wrapping"]
+      ...(settings.sidebarProjectGroupingMode !==
+      DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode
+        ? ["Project Grouping"]
         : []),
+      ...(settings.wordWrap !== DEFAULT_UNIFIED_SETTINGS.wordWrap ? ["Word wrap"] : []),
       ...(settings.diffIgnoreWhitespace !== DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace
         ? ["Diff whitespace changes"]
         : []),
@@ -408,12 +595,17 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.enableAssistantStreaming !== DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming
         ? ["Assistant output"]
         : []),
-      ...(Duration.toMillis(settings.automaticGitFetchInterval) !==
-      Duration.toMillis(DEFAULT_UNIFIED_SETTINGS.automaticGitFetchInterval)
-        ? ["Automatic Git fetch interval"]
+      ...(settings.enableProviderUpdateChecks !==
+      DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks
+        ? ["Provider update checks"]
         : []),
+      ...(isBackgroundActivityDirty ? ["Background activity"] : []),
       ...(settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode
         ? ["New thread mode"]
+        : []),
+      ...(settings.newWorktreesStartFromOrigin !==
+      DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin
+        ? ["New worktrees start from origin"]
         : []),
       ...(settings.addProjectBaseDirectory !== DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory
         ? ["Add project base directory"]
@@ -424,21 +616,26 @@ export function useSettingsRestore(onRestored?: () => void) {
       ...(settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete
         ? ["Delete confirmation"]
         : []),
-      ...(isGitWritingModelDirty ? ["Git writing model"] : []),
+      ...(isTextGenerationModelDirty ? ["Text generation model"] : []),
     ],
     [
-      isGitWritingModelDirty,
+      isTextGenerationModelDirty,
+      isBackgroundActivityDirty,
       settings.autoOpenPlanSidebar,
       settings.confirmThreadArchive,
       settings.confirmThreadDelete,
       settings.addProjectBaseDirectory,
       settings.defaultThreadEnvMode,
+      settings.newWorktreesStartFromOrigin,
       settings.diffIgnoreWhitespace,
-      settings.diffWordWrap,
-      settings.automaticGitFetchInterval,
+      settings.environmentIdentificationMode,
+      settings.glassOpacity,
       settings.enableAssistantStreaming,
+      settings.enableProviderUpdateChecks,
+      settings.sidebarProjectGroupingMode,
       settings.sidebarThreadPreviewCount,
       settings.timestampFormat,
+      settings.wordWrap,
       theme,
     ],
   );
@@ -456,13 +653,21 @@ export function useSettingsRestore(onRestored?: () => void) {
     setTheme("system");
     updateSettings({
       timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
-      diffWordWrap: DEFAULT_UNIFIED_SETTINGS.diffWordWrap,
+      wordWrap: DEFAULT_UNIFIED_SETTINGS.wordWrap,
       diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
+      environmentIdentificationMode: DEFAULT_UNIFIED_SETTINGS.environmentIdentificationMode,
+      glassOpacity: DEFAULT_UNIFIED_SETTINGS.glassOpacity,
       sidebarThreadPreviewCount: DEFAULT_UNIFIED_SETTINGS.sidebarThreadPreviewCount,
+      sidebarProjectGroupingMode: DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode,
       autoOpenPlanSidebar: DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar,
       enableAssistantStreaming: DEFAULT_UNIFIED_SETTINGS.enableAssistantStreaming,
+      enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
+      backgroundActivity: DEFAULT_UNIFIED_SETTINGS.backgroundActivity,
+      backgroundActivityProfile: DEFAULT_UNIFIED_SETTINGS.backgroundActivityProfile,
       automaticGitFetchInterval: DEFAULT_UNIFIED_SETTINGS.automaticGitFetchInterval,
+      providerHealthRefreshInterval: DEFAULT_UNIFIED_SETTINGS.providerHealthRefreshInterval,
       defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
+      newWorktreesStartFromOrigin: DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin,
       addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
       confirmThreadArchive: DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive,
       confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
@@ -477,48 +682,291 @@ export function useSettingsRestore(onRestored?: () => void) {
   };
 }
 
-export function GeneralSettingsPanel() {
-  const { theme, setTheme } = useTheme();
-  const settings = useSettings();
-  const { updateSettings } = useUpdateSettings();
-  const observability = useServerObservability();
-  const serverProviders = useServerProviders();
-  const diagnosticsDescription = formatDiagnosticsDescription({
-    localTracingEnabled: observability?.localTracingEnabled ?? false,
-    otlpTracesEnabled: observability?.otlpTracesEnabled ?? false,
-    otlpTracesUrl: observability?.otlpTracesUrl,
-    otlpMetricsEnabled: observability?.otlpMetricsEnabled ?? false,
-    otlpMetricsUrl: observability?.otlpMetricsUrl,
-  });
-
-  const textGenerationModelSelection = resolveAppModelSelectionState(settings, serverProviders);
-  const textGenInstanceId = textGenerationModelSelection.instanceId;
-  const textGenModel = textGenerationModelSelection.model;
-  const textGenModelOptions = textGenerationModelSelection.options;
-  const gitModelInstanceEntries = sortProviderInstanceEntries(
-    deriveProviderInstanceEntries(serverProviders),
+function BackgroundActivityAdvancedDialog({
+  open,
+  onOpenChange,
+}: {
+  readonly open: boolean;
+  readonly onOpenChange: (open: boolean) => void;
+}) {
+  const settings = usePrimarySettings();
+  const updateSettings = useUpdatePrimarySettings();
+  const resolvedBackgroundActivity = resolveServerBackgroundActivitySettings(settings);
+  const activeProfile = resolvedBackgroundActivity.profile;
+  const automaticGitFetchIntervalSeconds = durationToSeconds(
+    resolvedBackgroundActivity.automaticGitFetchInterval,
   );
-  const textGenInstanceEntry = gitModelInstanceEntries.find(
-    (entry) => entry.instanceId === textGenInstanceId,
+  const providerHealthRefreshIntervalSeconds = durationToSeconds(
+    resolvedBackgroundActivity.providerHealthRefreshInterval,
   );
-  const textGenProvider: ProviderDriverKind =
-    textGenInstanceEntry?.driverKind ?? DEFAULT_DRIVER_KIND;
-  const gitModelOptionsByInstance = getCustomModelOptionsByInstance(
-    settings,
-    serverProviders,
-    textGenInstanceId,
-    textGenModel,
+  const hostPowerMonitorActiveIntervalSeconds = durationToSeconds(
+    resolvedBackgroundActivity.hostPowerMonitorActiveInterval,
   );
-  const isGitWritingModelDirty = !Equal.equals(
-    settings.textGenerationModelSelection ?? null,
-    DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection ?? null,
+  const hostPowerMonitorIdleIntervalSeconds = durationToSeconds(
+    resolvedBackgroundActivity.hostPowerMonitorIdleInterval,
   );
 
   return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogPopup className="max-w-xl">
+        <DialogHeader>
+          <DialogTitle>Background Activity</DialogTitle>
+          <DialogDescription>
+            Tune the shared power policy and the background intervals that feed it.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogPanel className="space-y-0 px-6 pb-5">
+          <div className="overflow-hidden rounded-xl border bg-card text-card-foreground">
+            <div className="flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0 space-y-1">
+                <div className="text-sm font-medium">Shared policy</div>
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  Controls whether background work may run after a subscribed interval fires.
+                </p>
+              </div>
+              <Select
+                value={activeProfile}
+                onValueChange={(value) => {
+                  if (
+                    value === "balanced" ||
+                    value === "performance" ||
+                    value === "battery-saver"
+                  ) {
+                    updateSettings({
+                      backgroundActivity: backgroundActivitySharedPolicySettings(settings, value),
+                    });
+                  }
+                }}
+              >
+                <SelectTrigger className="w-full sm:w-40" aria-label="Shared background policy">
+                  <SelectValue>{BACKGROUND_ACTIVITY_PROFILE_LABELS[activeProfile]}</SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  <SelectItem hideIndicator value="balanced">
+                    {BACKGROUND_ACTIVITY_PROFILE_LABELS.balanced}
+                  </SelectItem>
+                  <SelectItem hideIndicator value="performance">
+                    {BACKGROUND_ACTIVITY_PROFILE_LABELS.performance}
+                  </SelectItem>
+                  <SelectItem hideIndicator value="battery-saver">
+                    {BACKGROUND_ACTIVITY_PROFILE_LABELS["battery-saver"]}
+                  </SelectItem>
+                </SelectPopup>
+              </Select>
+            </div>
+
+            <div className="flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0 space-y-1">
+                <div className="text-sm font-medium">Git fetch interval</div>
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  Refresh remote branch status in the background.
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <NumberField
+                  value={automaticGitFetchIntervalSeconds}
+                  min={0}
+                  step={5}
+                  size="sm"
+                  className="w-32"
+                  onValueChange={(value) =>
+                    updateSettings(
+                      backgroundActivityOverrideSettings(
+                        settings.backgroundActivity,
+                        resolvedBackgroundActivity,
+                        {
+                          automaticGitFetchInterval: Duration.seconds(
+                            normalizeIntervalSeconds(value),
+                          ),
+                        },
+                      ),
+                    )
+                  }
+                >
+                  <NumberFieldGroup>
+                    <NumberFieldDecrement aria-label="Decrease Git fetch interval" />
+                    <NumberFieldInput aria-label="Git fetch interval in seconds" />
+                    <NumberFieldIncrement aria-label="Increase Git fetch interval" />
+                  </NumberFieldGroup>
+                </NumberField>
+                <span className="text-xs text-muted-foreground">seconds</span>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-3 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0 space-y-1">
+                <div className="text-sm font-medium">Provider health interval</div>
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  Refresh provider availability, versions, auth state, and model metadata.
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <NumberField
+                  value={providerHealthRefreshIntervalSeconds}
+                  min={0}
+                  step={PROVIDER_HEALTH_INTERVAL_STEP_SECONDS}
+                  size="sm"
+                  className="w-32"
+                  onValueChange={(value) =>
+                    updateSettings(
+                      backgroundActivityOverrideSettings(
+                        settings.backgroundActivity,
+                        resolvedBackgroundActivity,
+                        {
+                          providerHealthRefreshInterval: Duration.seconds(
+                            normalizeIntervalSeconds(value),
+                          ),
+                        },
+                      ),
+                    )
+                  }
+                >
+                  <NumberFieldGroup>
+                    <NumberFieldDecrement aria-label="Decrease provider health interval" />
+                    <NumberFieldInput aria-label="Provider health interval in seconds" />
+                    <NumberFieldIncrement aria-label="Increase provider health interval" />
+                  </NumberFieldGroup>
+                </NumberField>
+                <span className="text-xs text-muted-foreground">seconds</span>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-3 border-t px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0 space-y-1">
+                <div className="text-sm font-medium">Host power monitor</div>
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  Poll host power state while clients are active.
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <NumberField
+                  value={hostPowerMonitorActiveIntervalSeconds}
+                  min={5}
+                  step={5}
+                  size="sm"
+                  className="w-32"
+                  onValueChange={(value) =>
+                    updateSettings(
+                      backgroundActivityOverrideSettings(
+                        settings.backgroundActivity,
+                        resolvedBackgroundActivity,
+                        {
+                          hostPowerMonitorActiveInterval: Duration.seconds(
+                            normalizeIntervalSeconds(value, 5),
+                          ),
+                        },
+                      ),
+                    )
+                  }
+                >
+                  <NumberFieldGroup>
+                    <NumberFieldDecrement aria-label="Decrease active host power interval" />
+                    <NumberFieldInput aria-label="Active host power interval in seconds" />
+                    <NumberFieldIncrement aria-label="Increase active host power interval" />
+                  </NumberFieldGroup>
+                </NumberField>
+                <span className="text-xs text-muted-foreground">seconds</span>
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-3 border-t px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0 space-y-1">
+                <div className="text-sm font-medium">Idle host monitor</div>
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  Poll host power state when no foreground client is active.
+                </p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <NumberField
+                  value={hostPowerMonitorIdleIntervalSeconds}
+                  min={5}
+                  step={30}
+                  size="sm"
+                  className="w-32"
+                  onValueChange={(value) =>
+                    updateSettings(
+                      backgroundActivityOverrideSettings(
+                        settings.backgroundActivity,
+                        resolvedBackgroundActivity,
+                        {
+                          hostPowerMonitorIdleInterval: Duration.seconds(
+                            normalizeIntervalSeconds(value, 5),
+                          ),
+                        },
+                      ),
+                    )
+                  }
+                >
+                  <NumberFieldGroup>
+                    <NumberFieldDecrement aria-label="Decrease idle host power interval" />
+                    <NumberFieldInput aria-label="Idle host power interval in seconds" />
+                    <NumberFieldIncrement aria-label="Increase idle host power interval" />
+                  </NumberFieldGroup>
+                </NumberField>
+                <span className="text-xs text-muted-foreground">seconds</span>
+              </div>
+            </div>
+
+            <div className="grid gap-0 border-t sm:grid-cols-2">
+              {BACKGROUND_ACTIVITY_BOOLEAN_OVERRIDES.map(({ key, label }) => (
+                <label
+                  key={key}
+                  className="flex items-center justify-between gap-3 border-b px-4 py-3 last:border-b-0 sm:border-r sm:even:border-r-0"
+                >
+                  <span className="text-sm font-medium">{label}</span>
+                  <Switch
+                    checked={resolvedBackgroundActivity[key]}
+                    onCheckedChange={(checked) =>
+                      updateSettings(
+                        backgroundActivityOverrideSettings(
+                          settings.backgroundActivity,
+                          resolvedBackgroundActivity,
+                          {
+                            [key]: Boolean(checked),
+                          },
+                        ),
+                      )
+                    }
+                    aria-label={label}
+                  />
+                </label>
+              ))}
+            </div>
+          </div>
+        </DialogPanel>
+        <DialogFooter>
+          <Button
+            variant="outline"
+            onClick={() => updateSettings(resetBackgroundActivitySettings())}
+          >
+            Reset all
+          </Button>
+          <Button onClick={() => onOpenChange(false)}>Done</Button>
+        </DialogFooter>
+      </DialogPopup>
+    </Dialog>
+  );
+}
+
+export function AppearanceSettingsPanel() {
+  const { theme, setTheme } = useTheme();
+  const settings = usePrimarySettings();
+  const updateSettings = useUpdatePrimarySettings();
+  const environmentStageLabel = useEnvironmentStageLabel();
+  const showEnvironmentIdentification =
+    resolveEnvironmentIdentificationPillLabel(environmentStageLabel) !== null;
+  const glassOpacityRatio =
+    (settings.glassOpacity - MIN_GLASS_OPACITY) / (MAX_GLASS_OPACITY - MIN_GLASS_OPACITY);
+  const glassOpacitySliderStyle = {
+    "--glass-slider-progress": `${glassOpacityRatio * 100}%`,
+    "--glass-slider-fill-offset": `${0.5 - glassOpacityRatio}rem`,
+  } as CSSProperties;
+
+  return (
     <SettingsPageContainer>
-      <SettingsSection title="General">
+      <SettingsSection id="appearance" title="Appearance">
         <SettingsRow
-          title="Theme"
+          {...searchableSetting("theme")}
           description="Choose how T3 Code looks across the app."
           resetAction={
             theme !== "system" ? (
@@ -551,7 +999,215 @@ export function GeneralSettingsPanel() {
         />
 
         <SettingsRow
-          title="Time format"
+          {...searchableSetting("setting-glass-opacity")}
+          description="Control how transparent glass surfaces are. Higher values make menus, dialogs, and the composer more solid."
+          resetAction={
+            settings.glassOpacity !== DEFAULT_UNIFIED_SETTINGS.glassOpacity ? (
+              <SettingResetButton
+                label="glass opacity"
+                onClick={() =>
+                  updateSettings({ glassOpacity: DEFAULT_UNIFIED_SETTINGS.glassOpacity })
+                }
+              />
+            ) : null
+          }
+          control={
+            <div className="flex w-full items-center gap-3 sm:w-52">
+              <output
+                className="min-w-12 rounded-md bg-muted px-2 py-1 text-center font-mono text-xs font-medium tabular-nums text-foreground"
+                htmlFor="glass-opacity"
+              >
+                {settings.glassOpacity}%
+              </output>
+              <input
+                aria-label="Glass opacity"
+                className="glass-opacity-slider min-w-0 flex-1"
+                id="glass-opacity"
+                max={MAX_GLASS_OPACITY}
+                min={MIN_GLASS_OPACITY}
+                onChange={(event) => {
+                  const glassOpacity = Number(event.currentTarget.value);
+                  if (
+                    Number.isInteger(glassOpacity) &&
+                    glassOpacity >= MIN_GLASS_OPACITY &&
+                    glassOpacity <= MAX_GLASS_OPACITY
+                  ) {
+                    updateSettings({ glassOpacity });
+                  }
+                }}
+                step={5}
+                style={glassOpacitySliderStyle}
+                type="range"
+                value={settings.glassOpacity}
+              />
+            </div>
+          }
+        />
+
+        {showEnvironmentIdentification ? (
+          <SettingsRow
+            {...searchableSetting("environment-identification")}
+            description="Choose how Dev and Nightly environments are identified."
+            resetAction={
+              settings.environmentIdentificationMode !== DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE ? (
+                <SettingResetButton
+                  label="environment identification"
+                  onClick={() =>
+                    updateSettings({
+                      environmentIdentificationMode: DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Select
+                value={settings.environmentIdentificationMode}
+                onValueChange={(value) => {
+                  if (value === "artwork" || value === "pill" || value === "none") {
+                    updateSettings({ environmentIdentificationMode: value });
+                  }
+                }}
+              >
+                <SelectTrigger className="w-full sm:w-40" aria-label="Environment identification">
+                  <SelectValue>
+                    {ENVIRONMENT_IDENTIFICATION_LABELS[settings.environmentIdentificationMode]}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  {Object.entries(ENVIRONMENT_IDENTIFICATION_LABELS).map(([value, label]) => (
+                    <SelectItem hideIndicator key={value} value={value}>
+                      {label}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+            }
+          />
+        ) : null}
+
+        <SettingsRow
+          {...searchableSetting("word-wrap")}
+          description="Wrap long lines in code blocks, tables, diffs, and file previews by default."
+          resetAction={
+            settings.wordWrap !== DEFAULT_UNIFIED_SETTINGS.wordWrap ? (
+              <SettingResetButton
+                label="word wrapping"
+                onClick={() =>
+                  updateSettings({
+                    wordWrap: DEFAULT_UNIFIED_SETTINGS.wordWrap,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.wordWrap}
+              onCheckedChange={(checked) => updateSettings({ wordWrap: Boolean(checked) })}
+              aria-label="Wrap code, tables, diffs, and file previews by default"
+            />
+          }
+        />
+      </SettingsSection>
+    </SettingsPageContainer>
+  );
+}
+
+export function GeneralSettingsPanel() {
+  const settings = usePrimarySettings();
+  const updateSettings = useUpdatePrimarySettings();
+  const [backgroundActivityDialogOpen, setBackgroundActivityDialogOpen] = useState(false);
+  const lastEnabledProjectGroupingMode = useRef<SidebarProjectGroupingMode>(
+    readLastEnabledProjectGroupingMode(),
+  );
+  const observability = useAtomValue(primaryServerObservabilityAtom);
+  const serverProviders = useAtomValue(primaryServerProvidersAtom);
+  const diagnosticsDescription = formatDiagnosticsDescription({
+    localTracingEnabled: observability?.localTracingEnabled ?? false,
+    otlpTracesEnabled: observability?.otlpTracesEnabled ?? false,
+    otlpTracesUrl: observability?.otlpTracesUrl,
+    otlpMetricsEnabled: observability?.otlpMetricsEnabled ?? false,
+    otlpMetricsUrl: observability?.otlpMetricsUrl,
+  });
+
+  const textGenerationModelSelection = resolveAppModelSelectionState(settings, serverProviders);
+  const textGenInstanceId = textGenerationModelSelection.instanceId;
+  const textGenModel = textGenerationModelSelection.model;
+  const textGenModelOptions = textGenerationModelSelection.options;
+  const textGenerationModelInstanceEntries = sortProviderInstanceEntries(
+    applyProviderInstanceSettings(deriveProviderInstanceEntries(serverProviders), settings),
+  );
+  const textGenInstanceEntry = textGenerationModelInstanceEntries.find(
+    (entry) => entry.instanceId === textGenInstanceId,
+  );
+  const textGenProvider: ProviderDriverKind =
+    textGenInstanceEntry?.driverKind ?? DEFAULT_DRIVER_KIND;
+  const textGenerationModelOptionsByInstance = getCustomModelOptionsByInstance(
+    settings,
+    serverProviders,
+    textGenInstanceId,
+    textGenModel,
+  );
+  const isTextGenerationModelDirty = !Equal.equals(
+    settings.textGenerationModelSelection ?? null,
+    DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection ?? null,
+  );
+  const resolvedBackgroundActivity = resolveServerBackgroundActivitySettings(settings);
+  const activeBackgroundActivityProfile = resolvedBackgroundActivity.profile;
+  const backgroundActivityProfileOption = resolveBackgroundActivityProfileOption(settings);
+  const backgroundActivityDescription =
+    backgroundActivityProfileOption === "advanced"
+      ? `${ADVANCED_BACKGROUND_ACTIVITY_DESCRIPTION} Current shared policy: ${
+          BACKGROUND_ACTIVITY_PROFILE_LABELS[activeBackgroundActivityProfile]
+        }.`
+      : BACKGROUND_ACTIVITY_PROFILE_DESCRIPTIONS[resolvedBackgroundActivity.profile];
+  const canResetBackgroundActivity = !Equal.equals(
+    settings.backgroundActivity,
+    DEFAULT_UNIFIED_SETTINGS.backgroundActivity,
+  );
+
+  return (
+    <SettingsPageContainer>
+      <SettingsSection title="General">
+        <SettingsRow
+          {...searchableSetting("project-grouping")}
+          description="Combine matching repositories across environments."
+          resetAction={
+            settings.sidebarProjectGroupingMode !==
+            DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode ? (
+              <SettingResetButton
+                label="project grouping"
+                onClick={() =>
+                  updateSettings({
+                    sidebarProjectGroupingMode: DEFAULT_UNIFIED_SETTINGS.sidebarProjectGroupingMode,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={isProjectGroupingEnabled(settings.sidebarProjectGroupingMode)}
+              onCheckedChange={(checked) => {
+                if (!checked && settings.sidebarProjectGroupingMode !== "separate") {
+                  lastEnabledProjectGroupingMode.current = settings.sidebarProjectGroupingMode;
+                  rememberEnabledProjectGroupingMode(settings.sidebarProjectGroupingMode);
+                }
+                updateSettings({
+                  sidebarProjectGroupingMode: projectGroupingModeFromToggle(
+                    checked,
+                    lastEnabledProjectGroupingMode.current,
+                  ),
+                });
+              }}
+              aria-label="Project grouping"
+            />
+          }
+        />
+
+        <SettingsRow
+          {...searchableSetting("time-format")}
           description="System default follows your browser or OS clock preference."
           resetAction={
             settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat ? (
@@ -593,31 +1249,7 @@ export function GeneralSettingsPanel() {
         />
 
         <SettingsRow
-          title="Diff line wrapping"
-          description="Set the default wrap state when the diff panel opens."
-          resetAction={
-            settings.diffWordWrap !== DEFAULT_UNIFIED_SETTINGS.diffWordWrap ? (
-              <SettingResetButton
-                label="diff line wrapping"
-                onClick={() =>
-                  updateSettings({
-                    diffWordWrap: DEFAULT_UNIFIED_SETTINGS.diffWordWrap,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.diffWordWrap}
-              onCheckedChange={(checked) => updateSettings({ diffWordWrap: Boolean(checked) })}
-              aria-label="Wrap diff lines by default"
-            />
-          }
-        />
-
-        <SettingsRow
-          title="Hide whitespace changes"
+          {...searchableSetting("hide-whitespace-changes")}
           description="Set whether the diff panel ignores whitespace-only edits by default."
           resetAction={
             settings.diffIgnoreWhitespace !== DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace ? (
@@ -643,7 +1275,7 @@ export function GeneralSettingsPanel() {
         />
 
         <SettingsRow
-          title="Assistant output"
+          {...searchableSetting("assistant-output")}
           description="Show token-by-token output while a response is in progress."
           resetAction={
             settings.enableAssistantStreaming !==
@@ -670,7 +1302,116 @@ export function GeneralSettingsPanel() {
         />
 
         <SettingsRow
-          title="Auto-open task panel"
+          {...searchableSetting("provider-update-checks")}
+          description="Check installed provider CLIs for newer available versions."
+          resetAction={
+            settings.enableProviderUpdateChecks !==
+            DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks ? (
+              <SettingResetButton
+                label="provider update checks"
+                onClick={() =>
+                  updateSettings({
+                    enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.enableProviderUpdateChecks}
+              onCheckedChange={(checked) =>
+                updateSettings({ enableProviderUpdateChecks: Boolean(checked) })
+              }
+              aria-label="Check provider versions"
+            />
+          }
+        />
+
+        <SettingsRow
+          title={
+            <span className="inline-flex items-center gap-1.5">
+              Background activity
+              <PolicyTooltip>
+                This shared policy gates background work such as Git refreshes and provider health
+                probes after their individual intervals elapse.
+              </PolicyTooltip>
+            </span>
+          }
+          description={backgroundActivityDescription}
+          resetAction={
+            canResetBackgroundActivity ? (
+              <SettingResetButton
+                label="background activity"
+                onClick={() => updateSettings(resetBackgroundActivitySettings())}
+              />
+            ) : null
+          }
+          control={
+            <>
+              <Select
+                value={backgroundActivityProfileOption}
+                onValueChange={(value) => {
+                  if (value === "advanced") {
+                    setBackgroundActivityDialogOpen(true);
+                    return;
+                  }
+                  if (
+                    value === "balanced" ||
+                    value === "performance" ||
+                    value === "battery-saver"
+                  ) {
+                    updateSettings(backgroundActivityProfileSettings(value));
+                  }
+                }}
+              >
+                <SelectTrigger className="w-full sm:w-40" aria-label="Background activity profile">
+                  <SelectValue>
+                    {BACKGROUND_ACTIVITY_PROFILE_OPTION_LABELS[backgroundActivityProfileOption]}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  <SelectItem hideIndicator value="balanced">
+                    {BACKGROUND_ACTIVITY_PROFILE_LABELS.balanced}
+                  </SelectItem>
+                  <SelectItem hideIndicator value="performance">
+                    {BACKGROUND_ACTIVITY_PROFILE_LABELS.performance}
+                  </SelectItem>
+                  <SelectItem hideIndicator value="battery-saver">
+                    {BACKGROUND_ACTIVITY_PROFILE_LABELS["battery-saver"]}
+                  </SelectItem>
+                  <SelectItem hideIndicator value="advanced">
+                    {BACKGROUND_ACTIVITY_PROFILE_OPTION_LABELS.advanced}
+                  </SelectItem>
+                </SelectPopup>
+              </Select>
+              {backgroundActivityProfileOption === "advanced" ? (
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        size="icon-sm"
+                        variant="outline"
+                        aria-label="Configure advanced background activity"
+                        onClick={() => setBackgroundActivityDialogOpen(true)}
+                      >
+                        <SettingsIcon className="size-4" />
+                      </Button>
+                    }
+                  />
+                  <TooltipPopup side="top">Configure background activity</TooltipPopup>
+                </Tooltip>
+              ) : null}
+              <BackgroundActivityAdvancedDialog
+                open={backgroundActivityDialogOpen}
+                onOpenChange={setBackgroundActivityDialogOpen}
+              />
+            </>
+          }
+        />
+
+        <SettingsRow
+          {...searchableSetting("auto-open-task-panel")}
           description="Open the right-side plan and task panel automatically when steps appear."
           resetAction={
             settings.autoOpenPlanSidebar !== DEFAULT_UNIFIED_SETTINGS.autoOpenPlanSidebar ? (
@@ -696,15 +1437,19 @@ export function GeneralSettingsPanel() {
         />
 
         <SettingsRow
-          title="New threads"
+          {...searchableSetting("new-threads")}
           description="Pick the default workspace mode for newly created draft threads."
           resetAction={
-            settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode ? (
+            settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode ||
+            settings.newWorktreesStartFromOrigin !==
+              DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin ? (
               <SettingResetButton
                 label="new threads"
                 onClick={() =>
                   updateSettings({
                     defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
+                    newWorktreesStartFromOrigin:
+                      DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin,
                   })
                 }
               />
@@ -736,8 +1481,39 @@ export function GeneralSettingsPanel() {
           }
         />
 
+        {settings.defaultThreadEnvMode === "worktree" ? (
+          <SettingsRow
+            className="bg-muted/20 sm:pl-9"
+            title={searchableSetting("start-from-origin").title}
+            description="Creates the worktree from the latest matching branch on origin instead of your local branch."
+            resetAction={
+              settings.newWorktreesStartFromOrigin !==
+              DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin ? (
+                <SettingResetButton
+                  label="new worktrees start from origin"
+                  onClick={() =>
+                    updateSettings({
+                      newWorktreesStartFromOrigin:
+                        DEFAULT_UNIFIED_SETTINGS.newWorktreesStartFromOrigin,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                checked={settings.newWorktreesStartFromOrigin}
+                onCheckedChange={(checked) =>
+                  updateSettings({ newWorktreesStartFromOrigin: Boolean(checked) })
+                }
+                aria-label="Start new worktrees from origin by default"
+              />
+            }
+          />
+        ) : null}
+
         <SettingsRow
-          title="Add project starts in"
+          {...searchableSetting("add-project-starts-in")}
           description='Leave empty to use "~/" when the Add Project browser opens.'
           resetAction={
             settings.addProjectBaseDirectory !==
@@ -765,7 +1541,7 @@ export function GeneralSettingsPanel() {
         />
 
         <SettingsRow
-          title="Archive confirmation"
+          {...searchableSetting("archive-confirmation")}
           description="Require a second click on the inline archive action before a thread is archived."
           resetAction={
             settings.confirmThreadArchive !== DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive ? (
@@ -791,7 +1567,7 @@ export function GeneralSettingsPanel() {
         />
 
         <SettingsRow
-          title="Delete confirmation"
+          {...searchableSetting("delete-confirmation")}
           description="Ask before deleting a thread and its chat history."
           resetAction={
             settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete ? (
@@ -817,10 +1593,10 @@ export function GeneralSettingsPanel() {
         />
 
         <SettingsRow
-          title="Text generation model"
-          description="Configure the model used for generated commit messages, PR titles, and similar Git text."
+          {...searchableSetting("text-generation-model")}
+          description="Default model for generated text like thread titles and source control content. Source control settings can override it with a dedicated source control writer model."
           resetAction={
-            isGitWritingModelDirty ? (
+            isTextGenerationModelDirty ? (
               <SettingResetButton
                 label="text generation model"
                 onClick={() =>
@@ -838,8 +1614,8 @@ export function GeneralSettingsPanel() {
                 activeInstanceId={textGenInstanceId}
                 model={textGenModel}
                 lockedProvider={null}
-                instanceEntries={gitModelInstanceEntries}
-                modelOptionsByInstance={gitModelOptionsByInstance}
+                instanceEntries={textGenerationModelInstanceEntries}
+                modelOptionsByInstance={textGenerationModelOptionsByInstance}
                 triggerVariant="outline"
                 triggerClassName="min-w-0 max-w-none shrink-0 text-foreground/90 hover:text-foreground"
                 onInstanceModelChange={(instanceId, model) => {
@@ -901,7 +1677,7 @@ export function GeneralSettingsPanel() {
           />
         )}
         <SettingsRow
-          title="Diagnostics"
+          {...searchableSetting("diagnostics")}
           description={diagnosticsDescription}
           control={
             <Button render={<Link to="/settings/diagnostics" />} size="xs" variant="outline">
@@ -915,9 +1691,16 @@ export function GeneralSettingsPanel() {
 }
 
 export function ProviderSettingsPanel() {
-  const settings = useSettings();
-  const { updateSettings } = useUpdateSettings();
-  const serverProviders = useServerProviders();
+  const settings = usePrimarySettings();
+  const updateSettings = useUpdatePrimarySettings();
+  const serverProviders = useAtomValue(primaryServerProvidersAtom);
+  const primaryEnvironment = usePrimaryEnvironment();
+  const refreshServerProviders = useAtomCommand(serverEnvironment.refreshProviders, {
+    reportFailure: false,
+  });
+  const updateProvider = useAtomCommand(serverEnvironment.updateProvider, {
+    reportFailure: false,
+  });
   const [isRefreshingProviders, setIsRefreshingProviders] = useState(false);
   const [isAddInstanceDialogOpen, setIsAddInstanceDialogOpen] = useState(false);
   const [updatingProviderDrivers, setUpdatingProviderDrivers] = useState<
@@ -944,6 +1727,14 @@ export function ProviderSettingsPanel() {
   );
   const textGenerationModelSelection = resolveAppModelSelectionState(settings, serverProviders);
   const textGenInstanceId = textGenerationModelSelection.instanceId;
+  const resolvedBackgroundActivity = resolveServerBackgroundActivitySettings(settings);
+  const providerHealthPreset = getBackgroundActivityPresetSettings(
+    resolvedBackgroundActivity.profile,
+  ).providerHealthRefreshInterval;
+  const providerHealthRefreshIntervalSeconds = durationToSeconds(
+    resolvedBackgroundActivity.providerHealthRefreshInterval,
+  );
+  const defaultProviderHealthRefreshIntervalSeconds = durationToSeconds(providerHealthPreset);
   const lastCheckedAt =
     serverProviders.length > 0
       ? serverProviders.reduce(
@@ -956,49 +1747,65 @@ export function ProviderSettingsPanel() {
     if (refreshingRef.current) return;
     refreshingRef.current = true;
     setIsRefreshingProviders(true);
-    void ensureLocalApi()
-      .server.refreshProviders()
-      .catch((error: unknown) => {
-        console.warn("Failed to refresh providers", error);
-      })
-      .finally(() => {
-        refreshingRef.current = false;
-        setIsRefreshingProviders(false);
-      });
-  }, []);
-
-  const runProviderUpdate = useCallback(async (candidate: ProviderUpdateCandidate) => {
-    let started = false;
-    setUpdatingProviderDrivers((previous) => {
-      if (previous.has(candidate.driver)) {
-        return previous;
-      }
-      started = true;
-      const next = new Set(previous);
-      next.add(candidate.driver);
-      return next;
-    });
-    if (!started) {
+    if (!primaryEnvironment) {
+      refreshingRef.current = false;
+      setIsRefreshingProviders(false);
       return;
     }
-
-    try {
-      await ensureLocalApi().server.updateProvider({
-        provider: candidate.driver,
-        instanceId: candidate.instanceId,
+    void (async () => {
+      const result = await refreshServerProviders({
+        environmentId: primaryEnvironment.environmentId,
+        input: {},
       });
-    } catch (error) {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: `Could not update ${PROVIDER_DISPLAY_NAMES[candidate.driver] ?? candidate.driver}`,
-          description:
-            error instanceof Error
-              ? error.message
-              : "The provider update command could not be started.",
-        }),
-      );
-    } finally {
+      refreshingRef.current = false;
+      setIsRefreshingProviders(false);
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        console.warn("Failed to refresh providers", {
+          operation: "refresh-providers",
+          environmentId: primaryEnvironment.environmentId,
+          ...safeErrorLogAttributes(squashAtomCommandFailure(result)),
+        });
+      }
+    })();
+  }, [primaryEnvironment, refreshServerProviders]);
+
+  const runProviderUpdate = useCallback(
+    async (candidate: ProviderUpdateCandidate) => {
+      if (!primaryEnvironment) return;
+      let started = false;
+      setUpdatingProviderDrivers((previous) => {
+        if (previous.has(candidate.driver)) {
+          return previous;
+        }
+        started = true;
+        const next = new Set(previous);
+        next.add(candidate.driver);
+        return next;
+      });
+      if (!started) {
+        return;
+      }
+
+      const result = await updateProvider({
+        environmentId: primaryEnvironment.environmentId,
+        input: {
+          provider: candidate.driver,
+          instanceId: candidate.instanceId,
+        },
+      });
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: `Could not update ${PROVIDER_DISPLAY_NAMES[candidate.driver] ?? candidate.driver}`,
+            description:
+              error instanceof Error
+                ? error.message
+                : "The provider update command could not be started.",
+          }),
+        );
+      }
       setUpdatingProviderDrivers((previous) => {
         if (!previous.has(candidate.driver)) {
           return previous;
@@ -1007,8 +1814,9 @@ export function ProviderSettingsPanel() {
         next.delete(candidate.driver);
         return next;
       });
-    }
-  }, []);
+    },
+    [primaryEnvironment, updateProvider],
+  );
 
   interface InstanceRow {
     readonly instanceId: ProviderInstanceId;
@@ -1143,7 +1951,12 @@ export function ProviderSettingsPanel() {
     nextFavoriteModels: ReadonlyArray<string>,
   ) => {
     const favoriteModels = [
-      ...new Set(nextFavoriteModels.map((slug) => slug.trim()).filter((slug) => slug.length > 0)),
+      ...new Set(
+        Arr.filterMap(nextFavoriteModels, (slug) => {
+          const trimmedSlug = slug.trim();
+          return trimmedSlug.length > 0 ? Result.succeed(trimmedSlug) : Result.failVoid;
+        }),
+      ),
     ];
     updateSettings({
       favorites: [
@@ -1179,7 +1992,7 @@ export function ProviderSettingsPanel() {
   return (
     <SettingsPageContainer>
       <SettingsSection
-        title="Providers"
+        {...searchableSetting("providers")}
         headerAction={
           <div className="flex items-center gap-1.5">
             <ProviderLastChecked lastCheckedAt={lastCheckedAt} />
@@ -1223,6 +2036,69 @@ export function ProviderSettingsPanel() {
           </div>
         }
       >
+        <SettingsRow
+          title={
+            <span className="inline-flex items-center gap-1.5">
+              Health check interval
+              <PolicyTooltip>
+                This interval is configured here, then the shared Background activity policy decides
+                whether provider probes may run when the timer fires. Custom intervals appear as
+                Advanced in General settings.
+              </PolicyTooltip>
+            </span>
+          }
+          description="Refresh provider availability, versions, auth state, and model metadata in the background. Set this to 0 seconds to rely on manual refreshes."
+          resetAction={
+            providerHealthRefreshIntervalSeconds !== defaultProviderHealthRefreshIntervalSeconds ? (
+              <SettingResetButton
+                label="provider health check interval"
+                onClick={() =>
+                  updateSettings(
+                    backgroundActivityOverrideSettings(
+                      settings.backgroundActivity,
+                      resolvedBackgroundActivity,
+                      {
+                        providerHealthRefreshInterval: undefined,
+                      },
+                    ),
+                  )
+                }
+              />
+            ) : null
+          }
+          control={
+            <div className="flex shrink-0 items-center gap-2">
+              <NumberField
+                value={providerHealthRefreshIntervalSeconds}
+                min={0}
+                step={PROVIDER_HEALTH_INTERVAL_STEP_SECONDS}
+                size="sm"
+                className="w-32"
+                onValueChange={(value) =>
+                  updateSettings(
+                    backgroundActivityOverrideSettings(
+                      settings.backgroundActivity,
+                      resolvedBackgroundActivity,
+                      {
+                        providerHealthRefreshInterval: Duration.seconds(
+                          normalizeIntervalSeconds(value),
+                        ),
+                      },
+                    ),
+                  )
+                }
+              >
+                <NumberFieldGroup>
+                  <NumberFieldDecrement aria-label="Decrease provider health check interval" />
+                  <NumberFieldInput aria-label="Provider health check interval in seconds" />
+                  <NumberFieldIncrement aria-label="Increase provider health check interval" />
+                </NumberFieldGroup>
+              </NumberField>
+              <span className="text-xs text-muted-foreground">seconds</span>
+            </div>
+          }
+        />
+
         {rows.map((row) => {
           const driverOption = getDriverOption(row.driver);
           const liveProvider = serverProviders.find(
@@ -1249,9 +2125,9 @@ export function ProviderSettingsPanel() {
             hiddenModels: [],
             modelOrder: [],
           };
-          const favoriteModels = (settings.favorites ?? [])
-            .filter((favorite) => favorite.provider === row.instanceId)
-            .map((favorite) => favorite.model);
+          const favoriteModels = Arr.filterMap(settings.favorites ?? [], (favorite) =>
+            favorite.provider === row.instanceId ? Result.succeed(favorite.model) : Result.failVoid,
+          );
           const resetLabel = driverOption?.label ?? String(row.driver);
           const headerAction =
             row.isDefault && row.isDirty ? (
@@ -1323,16 +2199,15 @@ export function ProviderSettingsPanel() {
         })}
       </SettingsSection>
 
-      <AddProviderInstanceDialog
-        open={isAddInstanceDialogOpen}
-        onOpenChange={setIsAddInstanceDialogOpen}
-      />
+      {isAddInstanceDialogOpen ? (
+        <AddProviderInstanceDialog open onOpenChange={setIsAddInstanceDialogOpen} />
+      ) : null}
     </SettingsPageContainer>
   );
 }
 
 export function ArchivedThreadsPanel() {
-  const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
+  const projects = useProjects();
   const { unarchiveThread, confirmAndDeleteThread } = useThreadActions();
   const environmentIds = useMemo(
     () => [...new Set(projects.map((project) => project.environmentId))],
@@ -1369,21 +2244,30 @@ export function ArchivedThreadsPanel() {
       })),
     );
 
-    return [...projectsByEnvironmentAndId.values()]
-      .map((project) => ({
-        project,
-        threads: threads
-          .filter(
-            (thread) =>
-              thread.projectId === project.id && thread.environmentId === project.environmentId,
-          )
-          .toSorted((left, right) => {
+    const archivedProjects = Array.from(projectsByEnvironmentAndId.values());
+    const groups: Array<{
+      readonly project: (typeof archivedProjects)[number];
+      readonly threads: Array<(typeof threads)[number]>;
+    }> = [];
+    for (const project of archivedProjects) {
+      const projectThreads: Array<(typeof threads)[number]> = [];
+      for (const thread of threads) {
+        if (thread.projectId === project.id && thread.environmentId === project.environmentId) {
+          projectThreads.push(thread);
+        }
+      }
+      if (projectThreads.length > 0) {
+        groups.push({
+          project,
+          threads: projectThreads.toSorted((left, right) => {
             const leftKey = left.archivedAt ?? left.createdAt;
             const rightKey = right.archivedAt ?? right.createdAt;
             return rightKey.localeCompare(leftKey) || right.id.localeCompare(left.id);
           }),
-      }))
-      .filter((group) => group.threads.length > 0);
+        });
+      }
+    }
+    return groups;
   }, [archivedSnapshots]);
 
   const handleArchivedThreadContextMenu = useCallback(
@@ -1399,10 +2283,11 @@ export function ArchivedThreadsPanel() {
       );
 
       if (clicked === "unarchive") {
-        try {
-          await unarchiveThread(threadRef);
+        const result = await unarchiveThread(threadRef);
+        if (result._tag === "Success") {
           refreshArchivedThreads();
-        } catch (error) {
+        } else if (!isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
           toastManager.add(
             stackedThreadToast({
               type: "error",
@@ -1415,8 +2300,19 @@ export function ArchivedThreadsPanel() {
       }
 
       if (clicked === "delete") {
-        await confirmAndDeleteThread(threadRef);
-        refreshArchivedThreads();
+        const result = await confirmAndDeleteThread(threadRef);
+        if (result._tag === "Success") {
+          refreshArchivedThreads();
+        } else if (!isAtomCommandInterrupted(result)) {
+          const error = squashAtomCommandFailure(result);
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: "Failed to delete thread",
+              description: error instanceof Error ? error.message : "An error occurred.",
+            }),
+          );
+        }
       }
     },
     [confirmAndDeleteThread, refreshArchivedThreads, unarchiveThread],
@@ -1425,7 +2321,10 @@ export function ArchivedThreadsPanel() {
   return (
     <SettingsPageContainer>
       {archivedGroups.length === 0 ? (
-        <SettingsSection title="Archived threads">
+        <SettingsSection
+          id={isLoadingArchive ? undefined : searchableSetting("archive").id}
+          title={searchableSetting("archive").title}
+        >
           <SettingsRow
             title={
               <span className="inline-flex items-center gap-2">
@@ -1449,9 +2348,10 @@ export function ArchivedThreadsPanel() {
           />
         </SettingsSection>
       ) : (
-        archivedGroups.map(({ project, threads: projectThreads }) => (
+        archivedGroups.map(({ project, threads: projectThreads }, index) => (
           <SettingsSection
             key={project.id}
+            id={index === 0 ? searchableSetting("archive").id : undefined}
             title={project.name}
             icon={<ProjectFavicon environmentId={project.environmentId} cwd={project.cwd} />}
           >
@@ -1460,13 +2360,28 @@ export function ArchivedThreadsPanel() {
                 key={thread.id}
                 onContextMenu={(event) => {
                   event.preventDefault();
-                  void handleArchivedThreadContextMenu(
-                    scopeThreadRef(thread.environmentId, thread.id),
-                    {
-                      x: event.clientX,
-                      y: event.clientY,
-                    },
-                  );
+                  void (async () => {
+                    const result = await settlePromise(() =>
+                      handleArchivedThreadContextMenu(
+                        scopeThreadRef(thread.environmentId, thread.id),
+                        {
+                          x: event.clientX,
+                          y: event.clientY,
+                        },
+                      ),
+                    );
+                    if (result._tag === "Failure") {
+                      const error = squashAtomCommandFailure(result);
+                      toastManager.add(
+                        stackedThreadToast({
+                          type: "error",
+                          title: "Archived thread action failed",
+                          description:
+                            error instanceof Error ? error.message : "An error occurred.",
+                        }),
+                      );
+                    }
+                  })();
                 }}
                 title={thread.title}
                 description={
@@ -1482,10 +2397,17 @@ export function ArchivedThreadsPanel() {
                     variant="outline"
                     size="sm"
                     className="h-7 shrink-0 cursor-pointer gap-1.5 px-2.5"
-                    onClick={() =>
-                      void unarchiveThread(scopeThreadRef(thread.environmentId, thread.id))
-                        .then(() => refreshArchivedThreads())
-                        .catch((error) => {
+                    onClick={() => {
+                      void (async () => {
+                        const result = await unarchiveThread(
+                          scopeThreadRef(thread.environmentId, thread.id),
+                        );
+                        if (result._tag === "Success") {
+                          refreshArchivedThreads();
+                          return;
+                        }
+                        if (!isAtomCommandInterrupted(result)) {
+                          const error = squashAtomCommandFailure(result);
                           toastManager.add(
                             stackedThreadToast({
                               type: "error",
@@ -1494,8 +2416,9 @@ export function ArchivedThreadsPanel() {
                                 error instanceof Error ? error.message : "An error occurred.",
                             }),
                           );
-                        })
-                    }
+                        }
+                      })();
+                    }}
                   >
                     <ArchiveX className="size-3.5" />
                     <span>Unarchive</span>

@@ -5,6 +5,7 @@ import type {
   ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
+import { ProviderDriverKind, defaultInstanceIdForDriver } from "@t3tools/contracts";
 import type { ChatMessage, Thread } from "../types";
 import { libraryThreadIdForSession } from "./isLibraryThread";
 
@@ -35,8 +36,11 @@ export interface LibrarySessionSummary {
 // No `Project` record exists in the store for this id; that is intentional.
 const LIBRARY_PROJECT_ID = "library:past-chats" as ProjectId;
 
+// Synthetic threads never dispatch a turn, so this selection is display-only.
+// It still has to satisfy `ModelSelection`, which now routes by provider
+// instance rather than by driver slug.
 const LIBRARY_DEFAULT_MODEL: ModelSelection = {
-  provider: "claudeAgent",
+  instanceId: defaultInstanceIdForDriver(ProviderDriverKind.make("claudeAgent")),
   model: "claude-sonnet-4-5",
 };
 
@@ -76,14 +80,13 @@ export function synthesizeLibraryThread(input: SynthesizeLibraryThreadInput): Th
     text: row.text,
     turnId: null,
     createdAt: row.timestamp,
-    completedAt: row.timestamp,
+    updatedAt: row.timestamp,
     streaming: false,
   }));
 
   return {
     id: threadId,
     environmentId,
-    codexThreadId: null,
     projectId: LIBRARY_PROJECT_ID,
     title: buildTitle(session),
     modelSelection: LIBRARY_DEFAULT_MODEL,
@@ -92,15 +95,17 @@ export function synthesizeLibraryThread(input: SynthesizeLibraryThreadInput): Th
     session: null,
     messages: chatMessages,
     proposedPlans: [],
-    error: null,
     createdAt: createdAtIso,
-    archivedAt: null,
     updatedAt: updatedAtIso,
+    archivedAt: null,
+    deletedAt: null,
+    settledOverride: null,
+    settledAt: null,
     latestTurn: null,
     branch: null,
     worktreePath: null,
-    turnDiffSummaries: [],
     activities: [],
+    checkpoints: [],
     readOnly: true,
   };
 }
