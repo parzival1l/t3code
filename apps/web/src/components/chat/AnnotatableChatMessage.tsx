@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 
 import { ChatAnnotationPopover } from "./ChatAnnotationPopover";
 import { ChatSelectionToolbar, type SelectionToolbarAnchorRect } from "./ChatSelectionToolbar";
@@ -221,26 +222,38 @@ export function AnnotatableChatMessage({
     [addChatAnnotation, composerDraftTarget, dismiss, messageId, pending],
   );
 
+  /**
+   * Both overlays position themselves from viewport coordinates
+   * (`getBoundingClientRect`), so they must be portalled out of the message.
+   * LegendList gives each virtualized row `contain: content`, and `contain:
+   * layout` makes that row the containing block for `position: fixed`
+   * descendants — the overlay would be offset by the row's own page position
+   * and land far below the viewport for any message low on screen.
+   */
+  const overlay =
+    pending === null ? null : isAnnotating ? (
+      <ChatAnnotationPopover
+        anchorRect={pending.rect}
+        quotedText={pending.markdown}
+        onSave={onSaveAnnotation}
+        onCancel={dismiss}
+      />
+    ) : (
+      <ChatSelectionToolbar
+        anchorRect={pending.rect}
+        isHighlighted={pending.overlappingHighlightId !== null}
+        onHighlight={onHighlight}
+        onAnnotate={() => setIsAnnotating(true)}
+        onCopy={onCopy}
+      />
+    );
+
   return (
     <div ref={containerRef} data-chat-message-id={messageId}>
       {children}
-      {pending !== null && !isAnnotating ? (
-        <ChatSelectionToolbar
-          anchorRect={pending.rect}
-          isHighlighted={pending.overlappingHighlightId !== null}
-          onHighlight={onHighlight}
-          onAnnotate={() => setIsAnnotating(true)}
-          onCopy={onCopy}
-        />
-      ) : null}
-      {pending !== null && isAnnotating ? (
-        <ChatAnnotationPopover
-          anchorRect={pending.rect}
-          quotedText={pending.markdown}
-          onSave={onSaveAnnotation}
-          onCancel={dismiss}
-        />
-      ) : null}
+      {overlay !== null && typeof document !== "undefined"
+        ? createPortal(overlay, document.body)
+        : null}
     </div>
   );
 }
