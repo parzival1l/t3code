@@ -196,6 +196,7 @@ import {
 } from "../lib/elementContext";
 import { appendPreviewAnnotationPrompt } from "../lib/previewAnnotation";
 import { appendReviewCommentsToPrompt, type ReviewCommentContext } from "../reviewCommentContext";
+import { appendAnnotationsToPrompt, type AnnotationContext } from "../annotationContext";
 import { environmentCatalog } from "../connection/catalog";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useKnownTerminalSessions, useThreadRunningTerminalIds } from "../state/terminalSessions";
@@ -1257,6 +1258,9 @@ function ChatViewContent(props: ChatViewProps) {
     (store) => store.setPreviewAnnotations,
   );
   const setComposerDraftReviewComments = useComposerDraftStore((store) => store.setReviewComments);
+  const setComposerDraftChatAnnotations = useComposerDraftStore(
+    (store) => store.setChatAnnotations,
+  );
   const setComposerDraftModelSelection = useComposerDraftStore((store) => store.setModelSelection);
   const setComposerDraftRuntimeMode = useComposerDraftStore((store) => store.setRuntimeMode);
   const setComposerDraftInteractionMode = useComposerDraftStore(
@@ -4077,7 +4081,8 @@ function ChatViewContent(props: ChatViewProps) {
         draft.terminalContexts.length > 0 ||
         draft.elementContexts.length > 0 ||
         draft.previewAnnotations.length > 0 ||
-        draft.reviewComments.length > 0),
+        draft.reviewComments.length > 0 ||
+        draft.chatAnnotations.length > 0),
     );
   });
   const activeBranchMismatchKey = branchMismatchKey(
@@ -4581,6 +4586,7 @@ function ChatViewContent(props: ChatViewProps) {
       elementContexts: composerElementContexts,
       previewAnnotations: composerPreviewAnnotations,
       reviewComments: composerReviewComments,
+      chatAnnotations: composerChatAnnotations,
       selectedProvider: ctxSelectedProvider,
       selectedModel: ctxSelectedModel,
       selectedProviderModels: ctxSelectedProviderModels,
@@ -4600,7 +4606,8 @@ function ChatViewContent(props: ChatViewProps) {
       elementContextCount:
         composerElementContexts.length +
         composerPreviewAnnotations.length +
-        composerReviewComments.length,
+        composerReviewComments.length +
+        composerChatAnnotations.length,
     });
     if (showPlanFollowUpPrompt && activeProposedPlan) {
       const followUp = resolvePlanFollowUpSubmission({
@@ -4621,7 +4628,8 @@ function ChatViewContent(props: ChatViewProps) {
       sendableComposerTerminalContexts.length === 0 &&
       composerElementContexts.length === 0 &&
       composerPreviewAnnotations.length === 0 &&
-      composerReviewComments.length === 0
+      composerReviewComments.length === 0 &&
+      composerChatAnnotations.length === 0
         ? parseStandaloneComposerSlashCommand(trimmed)
         : null;
     if (standaloneSlashCommand) {
@@ -4696,6 +4704,7 @@ function ChatViewContent(props: ChatViewProps) {
     const composerElementContextsSnapshot = [...composerElementContexts];
     const composerPreviewAnnotationsSnapshot = [...composerPreviewAnnotations];
     const composerReviewCommentsSnapshot: ReviewCommentContext[] = [...composerReviewComments];
+    const composerChatAnnotationsSnapshot: AnnotationContext[] = [...composerChatAnnotations];
     const messageTextWithContexts = appendElementContextsToPrompt(
       appendTerminalContextsToPrompt(promptForSend, composerTerminalContextsSnapshot),
       composerElementContextsSnapshot,
@@ -4704,9 +4713,13 @@ function ChatViewContent(props: ChatViewProps) {
       (text, annotation) => appendPreviewAnnotationPrompt(text, annotation),
       messageTextWithContexts,
     );
-    const messageTextForSend = appendReviewCommentsToPrompt(
+    const messageTextWithReviewComments = appendReviewCommentsToPrompt(
       messageTextWithPreviewAnnotations,
       composerReviewCommentsSnapshot,
+    );
+    const messageTextForSend = appendAnnotationsToPrompt(
+      messageTextWithReviewComments,
+      composerChatAnnotationsSnapshot,
     );
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
@@ -4908,6 +4921,8 @@ function ChatViewContent(props: ChatViewProps) {
         (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.previewAnnotations
           .length ?? 0) === 0 &&
         (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.reviewComments
+          .length ?? 0) === 0 &&
+        (useComposerDraftStore.getState().getComposerDraft(composerDraftTarget)?.chatAnnotations
           .length ?? 0) === 0
       ) {
         setOptimisticUserMessages((existing) => {
@@ -4929,6 +4944,7 @@ function ChatViewContent(props: ChatViewProps) {
         setComposerDraftElementContexts(composerDraftTarget, composerElementContextsSnapshot);
         setComposerDraftPreviewAnnotations(composerDraftTarget, composerPreviewAnnotationsSnapshot);
         setComposerDraftReviewComments(composerDraftTarget, composerReviewCommentsSnapshot);
+        setComposerDraftChatAnnotations(composerDraftTarget, composerChatAnnotationsSnapshot);
         composerRef.current?.resetCursorState({
           cursor: collapseExpandedComposerCursor(promptForSend, promptForSend.length),
           prompt: promptForSend,

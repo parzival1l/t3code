@@ -23,11 +23,19 @@ export interface MarkdownClipboardPayload {
   html: string;
 }
 
-function isSkippedElement(element: Element): boolean {
+/**
+ * Chrome that renders inside chat markdown but is not part of the message:
+ * copy buttons, decorative icons, screen-reader-only labels. Exported so
+ * highlight anchoring walks exactly the same text this serializer does — if the
+ * two disagreed, an anchor built from a selection could not be found again.
+ */
+export function isSkippedMarkdownElement(element: Element): boolean {
   if (SKIPPED_TAGS.has(element.tagName) || element.localName === "svg") return true;
   if (element.getAttribute("aria-hidden") === "true") return true;
   return SKIPPED_CLASS_NAMES.some((className) => element.classList.contains(className));
 }
+
+const isSkippedElement = isSkippedMarkdownElement;
 
 /** Hoists surrounding whitespace outside the markers: "` bold `" → " **bold** ". */
 function wrapInlineMarker(content: string, marker: string): string {

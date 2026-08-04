@@ -49,7 +49,13 @@ const REVIEW_COMMENT_BLOCK_PATTERN = /<review_comment\b([^>]*)>\s*([\s\S]*?)<\/r
 const REVIEW_COMMENT_ATTRIBUTE_PATTERN = /([a-zA-Z][a-zA-Z0-9_-]*)="([^"]*)"/g;
 const REVIEW_COMMENT_FENCE_PATTERN = /(`{3,})([^\s`]*)[^\n]*\n([\s\S]*?)\n\1/g;
 
-function escapeReviewCommentAttribute(value: string): string {
+/**
+ * Attribute escaping for the inline context blocks appended to a prompt.
+ * Exported because `annotationContext.ts` emits the same block grammar and the
+ * two must escape identically — a mismatch would round-trip one but not the
+ * other.
+ */
+export function escapeContextBlockAttribute(value: string): string {
   return value
     .replace(/&/g, "&amp;")
     .replace(/"/g, "&quot;")
@@ -57,7 +63,7 @@ function escapeReviewCommentAttribute(value: string): string {
     .replace(/>/g, "&gt;");
 }
 
-function unescapeReviewCommentAttribute(value: string): string {
+export function unescapeContextBlockAttribute(value: string): string {
   return value
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
@@ -65,13 +71,16 @@ function unescapeReviewCommentAttribute(value: string): string {
     .replace(/&amp;/g, "&");
 }
 
-function readReviewCommentAttributes(rawAttributes: string): Record<string, string> {
+export function readContextBlockAttributes(rawAttributes: string): Record<string, string> {
   const attributes: Record<string, string> = {};
   for (const match of rawAttributes.matchAll(REVIEW_COMMENT_ATTRIBUTE_PATTERN)) {
-    attributes[match[1]!] = unescapeReviewCommentAttribute(match[2] ?? "");
+    attributes[match[1]!] = unescapeContextBlockAttribute(match[2] ?? "");
   }
   return attributes;
 }
+
+const escapeReviewCommentAttribute = escapeContextBlockAttribute;
+const readReviewCommentAttributes = readContextBlockAttributes;
 
 function readNonNegativeInteger(value: string | undefined): number | null {
   if (value === undefined || !/^\d+$/.test(value)) {

@@ -38,6 +38,7 @@ import {
   resolveFileDiffPath,
 } from "../../lib/diffRendering";
 import ChatMarkdown from "../ChatMarkdown";
+import { AnnotatableChatMessage } from "./AnnotatableChatMessage";
 import {
   BotIcon,
   CheckIcon,
@@ -113,6 +114,7 @@ import {
   parseReviewCommentMessageSegments,
   type ReviewCommentContext,
 } from "../../reviewCommentContext";
+import { parseAnnotationMessageSegments, type AnnotationContext } from "../../annotationContext";
 
 // ---------------------------------------------------------------------------
 // Context — shared state consumed by every row component via Context.
@@ -1019,16 +1021,31 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
   const ctx = use(TimelineRowCtx);
   const messageText = row.message.text || (row.message.streaming ? "" : "(empty response)");
 
+  const markdown = (
+    <ChatMarkdown
+      text={messageText}
+      cwd={ctx.markdownCwd}
+      threadRef={ctx.threadRef ?? undefined}
+      isStreaming={Boolean(row.message.streaming)}
+      skills={ctx.skills}
+    />
+  );
+
   return (
     <>
       <div className="relative min-w-0 px-1 py-0.5">
-        <ChatMarkdown
-          text={messageText}
-          cwd={ctx.markdownCwd}
-          threadRef={ctx.threadRef ?? undefined}
-          isStreaming={Boolean(row.message.streaming)}
-          skills={ctx.skills}
-        />
+        {ctx.threadRef ? (
+          <AnnotatableChatMessage
+            threadKey={ctx.routeThreadKey}
+            messageId={row.message.id}
+            composerDraftTarget={ctx.threadRef}
+            isStreaming={Boolean(row.message.streaming)}
+          >
+            {markdown}
+          </AnnotatableChatMessage>
+        ) : (
+          markdown
+        )}
         <AssistantChangedFilesSection
           turnSummary={row.assistantTurnDiffSummary}
           routeThreadKey={ctx.routeThreadKey}
@@ -1513,6 +1530,35 @@ const UserMessageBody = memo(function UserMessageBody(props: {
     );
   };
 
+  const annotationSegments = parseAnnotationMessageSegments(props.text);
+  if (annotationSegments.some((segment) => segment.kind === "annotation")) {
+    return (
+      <div className="space-y-3 text-sm leading-relaxed text-foreground">
+        {annotationSegments.map((segment) =>
+          segment.kind === "text" ? (
+            segment.text.trim().length > 0 ? (
+              <div key={segment.id} className="wrap-break-word">
+                <ChatMarkdown
+                  text={segment.text.trim()}
+                  cwd={props.markdownCwd}
+                  threadRef={ctx.threadRef ?? undefined}
+                  skills={props.skills}
+                  className="text-foreground"
+                  lineBreaks
+                />
+              </div>
+            ) : null
+          ) : (
+            <UserMessageAnnotationCard
+              key={segment.annotation.id}
+              annotation={segment.annotation}
+            />
+          ),
+        )}
+      </div>
+    );
+  }
+
   const reviewCommentSegments = parseReviewCommentMessageSegments(props.text);
   if (reviewCommentSegments.some((segment) => segment.kind === "review-comment")) {
     return (
@@ -1644,6 +1690,30 @@ const UserMessageBody = memo(function UserMessageBody(props: {
     />
   );
 });
+
+/**
+ * Renders a sent annotation as the quote plus the reader's note, so re-reading
+ * the thread later shows what was asked about rather than raw block markup.
+ */
+function UserMessageAnnotationCard({ annotation }: { annotation: AnnotationContext }) {
+  const comment = annotation.comment.trim();
+  return (
+    <section className="rounded-lg border border-border/70 bg-background/60">
+      <div className="border-border/60 border-l-2 px-3 py-2">
+        <p className="text-muted-foreground text-[10px] uppercase tracking-wide">Selected text</p>
+        <p className="mt-1 whitespace-pre-wrap text-foreground/90 text-xs">
+          {annotation.quotedText}
+        </p>
+      </div>
+      {comment ? (
+        <div className="border-border/60 border-t px-3 py-2">
+          <p className="text-muted-foreground text-[10px] uppercase tracking-wide">Your note</p>
+          <p className="mt-1 whitespace-pre-wrap text-foreground text-xs">{comment}</p>
+        </div>
+      ) : null}
+    </section>
+  );
+}
 
 function UserMessageReviewCommentCard({ comment }: { comment: ReviewCommentContext }) {
   const ctx = use(TimelineRowCtx);

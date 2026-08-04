@@ -82,6 +82,13 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --app-scrollbar-thumb: rgb(217 217 217);
   --app-scrollbar-thumb-hover: rgb(191 191 191);
   /*
+   * Chat highlight marker. Theme-neutral on purpose: a highlight marks "come
+   * back to this", so it must not read as a status colour (warning, success,
+   * destructive). A low-alpha neutral wash keeps the text legible in both
+   * themes and does not compete with syntax highlighting inside code fences.
+   */
+  --chat-highlight: rgb(0 0 0 / 10%);
+  /*
    * Compact UI geometry. Keep these values semantic so sidebar, palette,
    * tooltip, and toolbar controls cannot quietly drift apart.
    */
@@ -111,6 +118,16 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   --app-scrollbar-thumb-hover: rgb(255 255 255 / 12%);
   --glass-blur: 16px;
   --glass-saturation: 1.08;
+  --chat-highlight: rgb(255 255 255 / 16%);
+}
+
+/*
+ * Painted by chat/highlightPainter.ts through the CSS Custom Highlight API.
+ * Only a few properties are allowed on ::highlight — background-color is one,
+ * so the marker is a wash rather than an underline or border.
+ */
+::highlight(t3-chat-highlight) {
+  background-color: var(--chat-highlight);
 }
 
 [data-slot="sidebar-wrapper"] {

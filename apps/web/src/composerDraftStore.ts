@@ -52,9 +52,11 @@ import { createDebouncedStorage, createMemoryStorage } from "./lib/storage";
 import { getDefaultServerModel } from "./providerModels";
 import { UnifiedSettings } from "@t3tools/contracts/settings";
 import { ReviewCommentContextSchema, type ReviewCommentContext } from "./reviewCommentContext";
+import { AnnotationContextSchema, type AnnotationContext } from "./annotationContext";
 const isRuntimeMode = Schema.is(RuntimeMode);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
 const isReviewCommentContext = Schema.is(ReviewCommentContextSchema);
+const isAnnotationContext = Schema.is(AnnotationContextSchema);
 
 export const COMPOSER_DRAFT_STORAGE_KEY = "t3code:composer-drafts:v1";
 const COMPOSER_DRAFT_STORAGE_VERSION = 8;
@@ -132,6 +134,7 @@ const PersistedComposerThreadDraftState = Schema.Struct({
   elementContexts: Schema.optionalKey(Schema.Array(PersistedElementContextDraft)),
   previewAnnotations: Schema.optionalKey(Schema.Array(PreviewAnnotationPayloadSchema)),
   reviewComments: Schema.optionalKey(Schema.Array(ReviewCommentContextSchema)),
+  chatAnnotations: Schema.optionalKey(Schema.Array(AnnotationContextSchema)),
   // Keyed by `ProviderInstanceId` (open branded slug) so custom provider
   // instances (e.g. `codex_personal`) round-trip alongside the built-in
   // `codex` / `claudeAgent` / ... entries. Every prior `ProviderDriverKind`
@@ -262,6 +265,12 @@ export interface ComposerThreadDraftState {
   elementContexts: ElementContextDraft[];
   previewAnnotations: PreviewAnnotationPayload[];
   reviewComments: ReviewCommentContext[];
+  /**
+   * Passages the reader selected in an assistant message, each with their
+   * note. Persisted inline because the quote is the payload — there is no
+   * live source to re-derive it from after a reload.
+   */
+  chatAnnotations: AnnotationContext[];
   /**
    * Per-instance model selection. Keyed by `ProviderInstanceId` (open
    * branded slug) so a default `codex` instance and a user-authored
@@ -489,6 +498,12 @@ interface ComposerDraftStoreState {
     comments: ReadonlyArray<ReviewCommentContext>,
   ) => void;
   removeReviewComment: (threadRef: ComposerThreadTarget, commentId: string) => void;
+  addChatAnnotation: (threadRef: ComposerThreadTarget, annotation: AnnotationContext) => void;
+  setChatAnnotations: (
+    threadRef: ComposerThreadTarget,
+    annotations: ReadonlyArray<AnnotationContext>,
+  ) => void;
+  removeChatAnnotation: (threadRef: ComposerThreadTarget, annotationId: string) => void;
   clearPersistedAttachments: (threadRef: ComposerThreadTarget) => void;
   syncPersistedAttachments: (
     threadRef: ComposerThreadTarget,
@@ -574,6 +589,7 @@ const EMPTY_TERMINAL_CONTEXTS: TerminalContextDraft[] = [];
 const EMPTY_ELEMENT_CONTEXTS: ElementContextDraft[] = [];
 const EMPTY_PREVIEW_ANNOTATIONS: PreviewAnnotationPayload[] = [];
 const EMPTY_REVIEW_COMMENTS: ReviewCommentContext[] = [];
+const EMPTY_CHAT_ANNOTATIONS: AnnotationContext[] = [];
 Object.freeze(EMPTY_IMAGES);
 Object.freeze(EMPTY_IDS);
 Object.freeze(EMPTY_PERSISTED_ATTACHMENTS);
@@ -596,6 +612,7 @@ const EMPTY_THREAD_DRAFT = Object.freeze<ComposerThreadDraftState>({
   elementContexts: EMPTY_ELEMENT_CONTEXTS,
   previewAnnotations: EMPTY_PREVIEW_ANNOTATIONS,
   reviewComments: EMPTY_REVIEW_COMMENTS,
+  chatAnnotations: EMPTY_CHAT_ANNOTATIONS,
   modelSelectionByProvider: EMPTY_MODEL_SELECTION_BY_PROVIDER,
   activeProvider: null,
   runtimeMode: null,
@@ -618,6 +635,7 @@ export function createEmptyThreadDraft(): ComposerThreadDraftState {
     elementContexts: [],
     previewAnnotations: [],
     reviewComments: [],
+    chatAnnotations: [],
     modelSelectionByProvider: {},
     activeProvider: null,
     runtimeMode: null,
@@ -691,6 +709,7 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
     draft.elementContexts.length === 0 &&
     draft.previewAnnotations.length === 0 &&
     draft.reviewComments.length === 0 &&
+    draft.chatAnnotations.length === 0 &&
     Object.keys(draft.modelSelectionByProvider).length === 0 &&
     draft.activeProvider === null &&
     draft.runtimeMode === null &&
@@ -1673,6 +1692,9 @@ function normalizePersistedDraftsByThreadId(
     const reviewComments = Array.isArray(draftCandidate.reviewComments)
       ? draftCandidate.reviewComments.filter(isReviewCommentContext)
       : [];
+    const chatAnnotations = Array.isArray(draftCandidate.chatAnnotations)
+      ? draftCandidate.chatAnnotations.filter(isAnnotationContext)
+      : [];
     const runtimeMode = isRuntimeMode(draftCandidate.runtimeMode)
       ? draftCandidate.runtimeMode
       : null;
@@ -1738,6 +1760,7 @@ function normalizePersistedDraftsByThreadId(
       terminalContexts.length === 0 &&
       elementContexts.length === 0 &&
       reviewComments.length === 0 &&
+      chatAnnotations.length === 0 &&
       !hasModelData &&
       !runtimeMode &&
       !interactionMode
@@ -1762,6 +1785,7 @@ function normalizePersistedDraftsByThreadId(
       ...(terminalContexts.length > 0 ? { terminalContexts } : {}),
       ...(elementContexts.length > 0 ? { elementContexts } : {}),
       ...(reviewComments.length > 0 ? { reviewComments } : {}),
+      ...(chatAnnotations.length > 0 ? { chatAnnotations } : {}),
       ...(hasModelData
         ? {
             modelSelectionByProvider: compactModelSelectionByProvider(modelSelectionByProvider),
@@ -1847,6 +1871,7 @@ function partializeComposerDraftStoreState(
       draft.elementContexts.length === 0 &&
       draft.previewAnnotations.length === 0 &&
       draft.reviewComments.length === 0 &&
+      draft.chatAnnotations.length === 0 &&
       !hasModelData &&
       draft.runtimeMode === null &&
       draft.interactionMode === null
@@ -1896,6 +1921,11 @@ function partializeComposerDraftStoreState(
       ...(draft.reviewComments.length > 0
         ? {
             reviewComments: draft.reviewComments.map((comment) => ({ ...comment })),
+          }
+        : {}),
+      ...(draft.chatAnnotations.length > 0
+        ? {
+            chatAnnotations: draft.chatAnnotations.map((annotation) => ({ ...annotation })),
           }
         : {}),
       ...(hasModelData
@@ -2141,6 +2171,7 @@ function toHydratedThreadDraft(
     previewAnnotations:
       persistedDraft.previewAnnotations?.map((annotation) => ({ ...annotation })) ?? [],
     reviewComments: persistedDraft.reviewComments?.map((comment) => ({ ...comment })) ?? [],
+    chatAnnotations: persistedDraft.chatAnnotations?.map((annotation) => ({ ...annotation })) ?? [],
     modelSelectionByProvider,
     activeProvider,
     runtimeMode: persistedDraft.runtimeMode ?? null,
@@ -3262,6 +3293,57 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             return { draftsByThreadKey: nextDraftsByThreadKey };
           });
         },
+        addChatAnnotation: (threadRef, annotation) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef);
+          if (!threadKey || !isAnnotationContext(annotation)) return;
+          set((state) => {
+            const existing = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
+            const chatAnnotations = existing.chatAnnotations.filter(
+              (entry) => entry.id !== annotation.id,
+            );
+            return {
+              draftsByThreadKey: {
+                ...state.draftsByThreadKey,
+                [threadKey]: {
+                  ...existing,
+                  chatAnnotations: [...chatAnnotations, { ...annotation }],
+                },
+              },
+            };
+          });
+        },
+        setChatAnnotations: (threadRef, annotations) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef);
+          if (!threadKey) return;
+          const chatAnnotations = annotations
+            .filter(isAnnotationContext)
+            .map((annotation) => ({ ...annotation }));
+          set((state) => {
+            const existing = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
+            const nextDraft = { ...existing, chatAnnotations };
+            const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
+            if (shouldRemoveDraft(nextDraft)) delete nextDraftsByThreadKey[threadKey];
+            else nextDraftsByThreadKey[threadKey] = nextDraft;
+            return { draftsByThreadKey: nextDraftsByThreadKey };
+          });
+        },
+        removeChatAnnotation: (threadRef, annotationId) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef);
+          if (!threadKey || !annotationId) return;
+          set((state) => {
+            const current = state.draftsByThreadKey[threadKey];
+            if (!current) return state;
+            const chatAnnotations = current.chatAnnotations.filter(
+              (entry) => entry.id !== annotationId,
+            );
+            if (chatAnnotations.length === current.chatAnnotations.length) return state;
+            const nextDraft = { ...current, chatAnnotations };
+            const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
+            if (shouldRemoveDraft(nextDraft)) delete nextDraftsByThreadKey[threadKey];
+            else nextDraftsByThreadKey[threadKey] = nextDraft;
+            return { draftsByThreadKey: nextDraftsByThreadKey };
+          });
+        },
         clearPersistedAttachments: (threadRef) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
           if (threadKey.length === 0) {
@@ -3337,6 +3419,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               elementContexts: [],
               previewAnnotations: [],
               reviewComments: [],
+              chatAnnotations: [],
             };
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
             if (shouldRemoveDraft(nextDraft)) {

@@ -79,6 +79,7 @@ import { useComposerPathSearch } from "../../lib/composerPathSearchState";
 import { type ElementContextDraft } from "../../lib/elementContext";
 import { ComposerPendingElementContexts } from "./ComposerPendingElementContexts";
 import { ComposerPendingReviewComments } from "./ComposerPendingReviewComments";
+import { ComposerPendingAnnotations } from "./ComposerPendingAnnotations";
 import { ComposerPreviewAnnotationCards } from "./ComposerPreviewAnnotationCards";
 import {
   shouldUseCompactComposerPrimaryActions,
@@ -205,6 +206,7 @@ import { formatProviderSkillDisplayName } from "../../providerSkillPresentation"
 import { searchProviderSkills } from "../../providerSkillSearch";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import type { ReviewCommentContext } from "../../reviewCommentContext";
+import type { AnnotationContext } from "../../annotationContext";
 
 const runtimeModeConfig: Record<
   RuntimeMode,
@@ -492,6 +494,7 @@ export interface ChatComposerHandle {
     elementContexts: ElementContextDraft[];
     previewAnnotations: PreviewAnnotationPayload[];
     reviewComments: ReviewCommentContext[];
+    chatAnnotations: AnnotationContext[];
     selectedPromptEffort: string | null;
     selectedModelOptionsForDispatch: unknown;
     selectedModelSelection: ModelSelection;
@@ -704,6 +707,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const composerElementContexts = composerDraft.elementContexts;
   const composerPreviewAnnotations = composerDraft.previewAnnotations;
   const composerReviewComments = composerDraft.reviewComments;
+  const composerChatAnnotations = composerDraft.chatAnnotations;
   const nonPersistedComposerImageIds = composerDraft.nonPersistedImageIds;
 
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
@@ -727,6 +731,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
   const removeComposerDraftReviewComment = useComposerDraftStore(
     (store) => store.removeReviewComment,
+  );
+  const removeComposerDraftChatAnnotation = useComposerDraftStore(
+    (store) => store.removeChatAnnotation,
   );
   const clearComposerDraftPersistedAttachments = useComposerDraftStore(
     (store) => store.clearPersistedAttachments,
@@ -2622,6 +2629,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         elementContexts: composerElementContextsRef.current,
         previewAnnotations: composerPreviewAnnotations,
         reviewComments: composerReviewComments,
+        chatAnnotations: composerChatAnnotations,
         selectedPromptEffort,
         selectedModelOptionsForDispatch,
         selectedModelSelection,
@@ -2643,6 +2651,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       composerElementContextsRef,
       composerPreviewAnnotations,
       composerReviewComments,
+      composerChatAnnotations,
       isConnecting,
       isComposerApprovalState,
       pendingUserInputs.length,
@@ -2936,6 +2945,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   comments={composerReviewComments}
                   onRemove={(commentId) =>
                     removeComposerDraftReviewComment(composerDraftTarget, commentId)
+                  }
+                  className="mb-3"
+                />
+              )}
+
+            {!isComposerCollapsedMobile &&
+              !isComposerApprovalState &&
+              pendingUserInputs.length === 0 &&
+              composerChatAnnotations.length > 0 && (
+                <ComposerPendingAnnotations
+                  annotations={composerChatAnnotations}
+                  onRemove={(annotationId) =>
+                    removeComposerDraftChatAnnotation(composerDraftTarget, annotationId)
                   }
                   className="mb-3"
                 />
