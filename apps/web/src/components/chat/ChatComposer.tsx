@@ -1028,12 +1028,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         prompt,
         imageCount: composerImages.length,
         terminalContexts: composerTerminalContexts,
+        // An attached context is sendable on its own. Quoting a passage and
+        // asking about it is a complete request, so an annotation with no typed
+        // prompt must still enable Send.
         elementContextCount:
           composerElementContexts.length +
           composerPreviewAnnotations.length +
-          composerReviewComments.length,
+          composerReviewComments.length +
+          composerChatAnnotations.length,
       }),
     [
+      composerChatAnnotations.length,
       composerElementContexts.length,
       composerImages.length,
       composerPreviewAnnotations.length,
